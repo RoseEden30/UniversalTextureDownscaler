@@ -139,3 +139,7 @@ turns the layer off for that one launch without unregistering it.
   for the Vulkan layer bootstrap, the Unreal Engine bootstrap-exe
   redirect (RCDATA resource #201), and the Vulkan registry registration
   approach.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
