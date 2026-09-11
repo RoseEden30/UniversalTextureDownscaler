@@ -1,0 +1,14 @@
+{
+    "file_format_version": "1.0.0",
+    "layer": {
+        "name": "VK_LAYER_universaltexturedownscaler",
+        "type": "GLOBAL",
+        "library_path": ".\\UniversalTextureDownscaler_Vulkan.dll",
+        "api_version": "1.3.0",
+        "implementation_version": "1",
+        "description": "UniversalTextureDownscaler - drops the largest mip levels of textures at creation time to cut VRAM usage, without touching files on disk",
+        "disable_environment": {
+            "DISABLE_UNIVERSALTEXTUREDOWNSCALER": "1"
+        }
+    }
+}

@@ -1,0 +1,9 @@
+; Static, unlike the D3D proxies' generated .def files: the Vulkan loader
+; resolves a layer's entry points by name only, no ordinals to match.
+LIBRARY UniversalTextureDownscaler_Vulkan
+EXPORTS
+    vkNegotiateLoaderLayerInterfaceVersion
+    vkGetInstanceProcAddr
+    vkGetDeviceProcAddr
+    vkCreateInstance
+    vkCreateDevice

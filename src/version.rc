@@ -1,0 +1,32 @@
+// Compiled into both binaries. The installer matches ProductName below to
+// tell this project's own d3d11.dll/d3d12.dll apart from another mod's
+// before overwriting or deleting one. Renaming the file on disk doesn't
+// affect this resource.
+#include <winver.h>
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 1,0,0,0
+ PRODUCTVERSION 1,0,0,0
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+ FILEFLAGS 0x0L
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_DLL
+ FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName",      "UniversalTextureDownscaler"
+            VALUE "FileDescription",  "Drops the largest mip levels of textures at creation time to cut VRAM use"
+            VALUE "FileVersion",      "1.0.0.0"
+            VALUE "InternalName",     "UniversalTextureDownscaler"
+            VALUE "ProductName",      "UniversalTextureDownscaler"
+            VALUE "ProductVersion",   "1.0.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

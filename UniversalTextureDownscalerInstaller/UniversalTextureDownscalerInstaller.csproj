@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>UniversalTextureDownscalerInstaller</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <Version>1.0.0</Version>
+    <ApplicationIcon>app.ico</ApplicationIcon>
+
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+  </PropertyGroup>
+
+  <!-- Binaries ship embedded in the installer .exe. d3d.dll covers both D3D11
+       and D3D12 (same binary, see CMakeLists.txt) and gets written out under
+       whichever name the target game needs. -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\build\RelWithDebInfo\d3d12.dll" Condition="Exists('..\build\RelWithDebInfo\d3d12.dll')">
+      <LogicalName>d3d.dll</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="..\build\RelWithDebInfo\UniversalTextureDownscaler_Vulkan.dll" Condition="Exists('..\build\RelWithDebInfo\UniversalTextureDownscaler_Vulkan.dll')">
+      <LogicalName>UniversalTextureDownscaler_Vulkan.dll</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="..\UniversalTextureDownscaler_Vulkan.json" Condition="Exists('..\UniversalTextureDownscaler_Vulkan.json')">
+      <LogicalName>UniversalTextureDownscaler_Vulkan.json</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
+</Project>
