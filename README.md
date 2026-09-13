@@ -3,8 +3,8 @@
 Drops the largest mip levels of textures at creation time to cut VRAM usage,
 without touching any files on disk. Same idea as
 [TextureDownscaler](https://github.com/RoseEden30/TextureDownscaler) (the
-Skyrim SKSE plugin this is named after), generalized to any D3D11, D3D12 or
-Vulkan game, with no per-game or per-file rules.
+Skyrim SKSE plugin this is named after), generalized to D3D11, D3D12 or
+Vulkan games, with no per-game or per-file rules.
 
 Avoid it in online games with active anti-cheat. It hooks the graphics API
 the same way some cheat tools do, and anti-cheat software generally flags
