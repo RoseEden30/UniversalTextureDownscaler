@@ -99,6 +99,15 @@ namespace {
     // Device3 +3 (OpenExistingHeapFromAddress..EnqueueMakeResident) -> 50,
     // then ID3D12Device4::CreateCommandList1 -> 51.
     constexpr std::size_t kSlot_CreateCommandList1 = 51;
+    // Same counting, further along: Device4 also adds CreateProtectedResourceSession
+    // (52) then CreateCommittedResource1 (53).
+    constexpr std::size_t kSlot_CreateCommittedResource1 = 53;
+    // Device8's own additions; 68 is GetResourceAllocationInfo2.
+    constexpr std::size_t kSlot_CreateCommittedResource2 = 69;
+    constexpr std::size_t kSlot_CreatePlacedResource1    = 70;
+    // Device10's, after Device9's three (ShaderCache/CommandQueue1).
+    constexpr std::size_t kSlot_CreateCommittedResource3 = 76;
+    constexpr std::size_t kSlot_CreatePlacedResource2    = 77;
     // ID3D12GraphicsCommandList = IUnknown(3) + ID3D12Object(4) +
     // ID3D12DeviceChild(1, GetDevice) + ID3D12CommandList(1, GetType) + own:
     constexpr std::size_t kSlot_CopyTextureRegion = 16;
@@ -133,7 +142,12 @@ namespace {
     // CreatePlacedResource's caller-visible desc (heap type checked
     // separately below) and reused as the first stage by the full check, so
     // the two always agree on the same resource.
-    const char* DescOnlyRejectionReason(const D3D12_RESOURCE_DESC& desc) {
+    //
+    // Templated over D3D12_RESOURCE_DESC and D3D12_RESOURCE_DESC1: every field
+    // read here is spelled the same in both, and DESC1 only adds
+    // SamplerFeedbackMipRegion on the end.
+    template <typename Desc>
+    const char* DescOnlyRejectionReason(const Desc& desc) {
         if (desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D) return "not-texture2d";
         if (desc.MipLevels <= 1) return "single-mip";
         if (desc.DepthOrArraySize != 1) return "array-or-cubemap";
@@ -155,11 +169,18 @@ namespace {
         // rejecting CPU-visible heaps.
         if (desc.Layout != D3D12_TEXTURE_LAYOUT_UNKNOWN) return "explicit-layout";
 
+        // Sampler feedback: the region is expressed in the paired texture's
+        // mips, so shrinking only this one desyncs the pair.
+        if constexpr (requires { desc.SamplerFeedbackMipRegion; })
+            if (desc.SamplerFeedbackMipRegion.Width != 0 || desc.SamplerFeedbackMipRegion.Height != 0)
+                return "sampler-feedback";
+
         return nullptr;
     }
 
     // No Enabled check here; the caller checks that separately.
-    const char* RejectionReason(const D3D12_RESOURCE_DESC& desc, const D3D12_HEAP_PROPERTIES& heapProps,
+    template <typename Desc>
+    const char* RejectionReason(const Desc& desc, const D3D12_HEAP_PROPERTIES& heapProps,
                                 D3D12_HEAP_FLAGS heapFlags) {
         if (const char* reason = DescOnlyRejectionReason(desc)) return reason;
 
@@ -204,7 +225,8 @@ namespace {
     // (many small textures reusing the same heap pointer, consistent with a
     // virtual-texturing physical tile cache) be told apart from many
     // independent small assets, from the log alone.
-    void LogReduction(const D3D12_RESOURCE_DESC& original, std::uint32_t skip, const char* origin,
+    template <typename Desc>
+    void LogReduction(const Desc& original, std::uint32_t skip, const char* origin,
                       ID3D12Heap* heap) {
         if (skip == 0) return;
 
@@ -294,67 +316,66 @@ namespace {
         ID3D12Device*, ID3D12Heap*, UINT64, const D3D12_RESOURCE_DESC*,
         D3D12_RESOURCE_STATES, const D3D12_CLEAR_VALUE*, REFIID, void**);
 
-    CreateCommittedResource_t g_originalCreateCommittedResource = nullptr;
-    CreatePlacedResource_t g_originalCreatePlacedResource       = nullptr;
+    // The later overloads an engine may use instead. 1 takes the same desc plus
+    // a protected session; 2/3 and Placed1/2 take D3D12_RESOURCE_DESC1, which
+    // only appends SamplerFeedbackMipRegion. Everything they add beyond the
+    // desc is independent of the mip count and is forwarded untouched.
+    using CreateCommittedResource1_t = HRESULT(STDMETHODCALLTYPE*)(
+        ID3D12Device4*, const D3D12_HEAP_PROPERTIES*, D3D12_HEAP_FLAGS, const D3D12_RESOURCE_DESC*,
+        D3D12_RESOURCE_STATES, const D3D12_CLEAR_VALUE*, ID3D12ProtectedResourceSession*, REFIID, void**);
+    using CreateCommittedResource2_t = HRESULT(STDMETHODCALLTYPE*)(
+        ID3D12Device8*, const D3D12_HEAP_PROPERTIES*, D3D12_HEAP_FLAGS, const D3D12_RESOURCE_DESC1*,
+        D3D12_RESOURCE_STATES, const D3D12_CLEAR_VALUE*, ID3D12ProtectedResourceSession*, REFIID, void**);
+    using CreateCommittedResource3_t = HRESULT(STDMETHODCALLTYPE*)(
+        ID3D12Device10*, const D3D12_HEAP_PROPERTIES*, D3D12_HEAP_FLAGS, const D3D12_RESOURCE_DESC1*,
+        D3D12_BARRIER_LAYOUT, const D3D12_CLEAR_VALUE*, ID3D12ProtectedResourceSession*, UINT32,
+        const DXGI_FORMAT*, REFIID, void**);
+    using CreatePlacedResource1_t = HRESULT(STDMETHODCALLTYPE*)(
+        ID3D12Device8*, ID3D12Heap*, UINT64, const D3D12_RESOURCE_DESC1*, D3D12_RESOURCE_STATES,
+        const D3D12_CLEAR_VALUE*, REFIID, void**);
+    using CreatePlacedResource2_t = HRESULT(STDMETHODCALLTYPE*)(
+        ID3D12Device10*, ID3D12Heap*, UINT64, const D3D12_RESOURCE_DESC1*, D3D12_BARRIER_LAYOUT,
+        const D3D12_CLEAR_VALUE*, UINT32, const DXGI_FORMAT*, REFIID, void**);
 
-    HRESULT STDMETHODCALLTYPE Hook_CreateCommittedResource(
-        ID3D12Device* self, const D3D12_HEAP_PROPERTIES* heapProps, D3D12_HEAP_FLAGS heapFlags,
-        const D3D12_RESOURCE_DESC* desc, D3D12_RESOURCE_STATES state,
-        const D3D12_CLEAR_VALUE* clear, REFIID riid, void** out) {
-        const char* structuralReason = (desc && heapProps) ? RejectionReason(*desc, *heapProps, heapFlags) : "no-desc";
-        if (structuralReason == nullptr) Heartbeat();
+    CreateCommittedResource_t g_originalCreateCommittedResource   = nullptr;
+    CreatePlacedResource_t g_originalCreatePlacedResource         = nullptr;
+    CreateCommittedResource1_t g_originalCreateCommittedResource1 = nullptr;
+    CreateCommittedResource2_t g_originalCreateCommittedResource2 = nullptr;
+    CreateCommittedResource3_t g_originalCreateCommittedResource3 = nullptr;
+    CreatePlacedResource1_t g_originalCreatePlacedResource1       = nullptr;
+    CreatePlacedResource2_t g_originalCreatePlacedResource2       = nullptr;
 
-        const char* reason = g_enabled.load(std::memory_order_relaxed) ? structuralReason : "disabled";
-        const bool isCandidate = reason == nullptr;
+    // Shared body for every create entry point: `call(desc)` runs the
+    // down-chain call with whichever desc it is handed.
+    template <typename Desc, typename Call>
+    HRESULT CreateReduced(const Desc* desc, const char* origin, ID3D12Heap* heap, void** out, Call&& call) {
+        const auto skip = ComputeSkip(desc->Width, desc->Height, desc->MipLevels,
+                                      IsBlockCompressed(desc->Format),
+                                      g_maxSize.load(std::memory_order_relaxed));
+        if (skip == 0) return call(desc);
 
-        if (g_verbose.load(std::memory_order_relaxed) && desc &&
-            desc->Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && desc->MipLevels > 1) {
-            const std::scoped_lock lock(g_logMutex);
-            if (g_log) {
-                fprintf(g_log, "[multi-mip:committed] %llux%u mips=%u fmt=%u -> %s\n",
-                        static_cast<unsigned long long>(desc->Width), desc->Height, desc->MipLevels,
-                        static_cast<unsigned>(desc->Format), reason ? reason : "ACCEPTED");
-                fflush(g_log);
-            }
-        }
-
-        if (!isCandidate) {
-            return g_originalCreateCommittedResource(self, heapProps, heapFlags, desc, state, clear, riid, out);
-        }
-
-        const auto skip = ComputeSkip(desc->Width, desc->Height, desc->MipLevels, IsBlockCompressed(desc->Format),
-                                       g_maxSize.load(std::memory_order_relaxed));
-        if (skip == 0) {
-            return g_originalCreateCommittedResource(self, heapProps, heapFlags, desc, state, clear, riid, out);
-        }
-
-        D3D12_RESOURCE_DESC reduced = *desc;
+        Desc reduced      = *desc;
         reduced.Width     = desc->Width >> skip;
         reduced.Height    = static_cast<UINT>(desc->Height >> skip);
         reduced.MipLevels = static_cast<UINT16>(desc->MipLevels - skip);
-        // Alignment depends on size (small textures qualify for 4KB tiles
-        // instead of the default 64KB), so 0 lets the runtime pick the
-        // correct one for these dimensions instead of carrying over a
-        // value that was right for the original, larger size.
+        // Alignment depends on size (a small texture qualifies for 4KB tiles
+        // instead of the default 64KB), so 0 lets the runtime pick.
         reduced.Alignment = 0;
 
-        const HRESULT hr =
-            g_originalCreateCommittedResource(self, heapProps, heapFlags, &reduced, state, clear, riid, out);
-
+        const HRESULT hr = call(&reduced);
         if (FAILED(hr)) {
-            // Something about this texture wasn't accounted for. Better a
-            // full-size texture than none at all.
+            // Better a full-size texture than none at all.
             const std::scoped_lock lock(g_logMutex);
             if (g_log) {
-                fprintf(g_log, "D3D refused reduced %llux%u mips=%u (0x%08X), retrying at full size\n",
-                        static_cast<unsigned long long>(reduced.Width), reduced.Height, reduced.MipLevels,
-                        static_cast<unsigned>(hr));
+                fprintf(g_log, "D3D refused reduced %s %llux%u mips=%u (0x%08X), retrying at full size\n",
+                        origin, static_cast<unsigned long long>(reduced.Width), reduced.Height,
+                        reduced.MipLevels, static_cast<unsigned>(hr));
                 fflush(g_log);
             }
-            return g_originalCreateCommittedResource(self, heapProps, heapFlags, desc, state, clear, riid, out);
+            return call(desc);
         }
 
-        LogReduction(*desc, skip, "committed", nullptr);
+        LogReduction(*desc, skip, origin, heap);
 
         if (out && *out) {
             EnsureResourceReleaseHooked(*out);
@@ -364,88 +385,131 @@ namespace {
         return hr;
     }
 
-    // Streamed textures typically go through here, not CreateCommittedResource.
-    // The heap's real type is queried via heap->GetDesc(), the one piece of
-    // info CreateCommittedResource gets as a parameter directly and this call
-    // doesn't.
-    HRESULT STDMETHODCALLTYPE Hook_CreatePlacedResource(
-        ID3D12Device* self, ID3D12Heap* heap, UINT64 offset, const D3D12_RESOURCE_DESC* desc,
-        D3D12_RESOURCE_STATES state, const D3D12_CLEAR_VALUE* clear, REFIID riid, void** out) {
-        const bool verbose = g_verbose.load(std::memory_order_relaxed) && desc &&
-            desc->Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && desc->MipLevels > 1;
+    template <typename Desc>
+    void LogCandidate(const char* origin, const Desc* desc, const char* reason) {
+        if (!g_verbose.load(std::memory_order_relaxed) || !desc ||
+            desc->Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || desc->MipLevels <= 1)
+            return;
 
+        const std::scoped_lock lock(g_logMutex);
+        if (!g_log) return;
+        fprintf(g_log, "[multi-mip:%s] %llux%u mips=%u fmt=%u -> %s\n", origin,
+                static_cast<unsigned long long>(desc->Width), desc->Height, desc->MipLevels,
+                static_cast<unsigned>(desc->Format), reason ? reason : "ACCEPTED");
+        fflush(g_log);
+    }
+
+    // Committed side: the heap is described by the parameters themselves.
+    template <typename Desc, typename Call>
+    HRESULT CreateCommitted(const D3D12_HEAP_PROPERTIES* heapProps, D3D12_HEAP_FLAGS heapFlags,
+                            const Desc* desc, const char* origin, void** out, Call&& call) {
+        const char* structural = (desc && heapProps) ? RejectionReason(*desc, *heapProps, heapFlags) : "no-desc";
+        if (structural == nullptr) Heartbeat();
+
+        const char* reason = g_enabled.load(std::memory_order_relaxed) ? structural : "disabled";
+        LogCandidate(origin, desc, reason);
+
+        if (reason != nullptr) return call(desc);
+        return CreateReduced(desc, origin, nullptr, out, std::forward<Call>(call));
+    }
+
+    // Placed side: the heap's real type has to be queried off the heap itself.
+    template <typename Desc, typename Call>
+    HRESULT CreatePlaced(ID3D12Heap* heap, const Desc* desc, const char* origin, void** out, Call&& call) {
         if (!desc || !heap || DescOnlyRejectionReason(*desc) != nullptr) {
-            if (verbose) LogLine("[multi-mip:placed] rejected before heap check (see DescOnlyRejectionReason)");
-            return g_originalCreatePlacedResource(self, heap, offset, desc, state, clear, riid, out);
+            LogCandidate(origin, desc, "rejected-on-desc");
+            return call(desc);
         }
 
         const D3D12_HEAP_DESC heapDesc = heap->GetDesc();
         if (!IsGpuOnlyHeap(heapDesc.Properties) || (heapDesc.Flags & D3D12_HEAP_FLAG_SHARED)) {
-            if (verbose) {
-                const std::scoped_lock lock(g_logMutex);
-                if (g_log) {
-                    fprintf(g_log, "[multi-mip:placed] %llux%u mips=%u fmt=%u -> cpu-visible-or-shared-heap\n",
-                            static_cast<unsigned long long>(desc->Width), desc->Height, desc->MipLevels,
-                            static_cast<unsigned>(desc->Format));
-                    fflush(g_log);
-                }
-            }
-            return g_originalCreatePlacedResource(self, heap, offset, desc, state, clear, riid, out);
+            LogCandidate(origin, desc, "cpu-visible-or-shared-heap");
+            return call(desc);
         }
 
         Heartbeat();
-        if (!g_enabled.load(std::memory_order_relaxed))
-            return g_originalCreatePlacedResource(self, heap, offset, desc, state, clear, riid, out);
-
-        if (verbose) {
-            const std::scoped_lock lock(g_logMutex);
-            if (g_log) {
-                fprintf(g_log, "[multi-mip:placed] %llux%u mips=%u fmt=%u -> ACCEPTED\n",
-                        static_cast<unsigned long long>(desc->Width), desc->Height, desc->MipLevels,
-                        static_cast<unsigned>(desc->Format));
-                fflush(g_log);
-            }
+        if (!g_enabled.load(std::memory_order_relaxed)) {
+            LogCandidate(origin, desc, "disabled");
+            return call(desc);
         }
 
-        const auto skip = ComputeSkip(desc->Width, desc->Height, desc->MipLevels, IsBlockCompressed(desc->Format),
-                                       g_maxSize.load(std::memory_order_relaxed));
-        if (skip == 0) {
-            return g_originalCreatePlacedResource(self, heap, offset, desc, state, clear, riid, out);
-        }
+        LogCandidate(origin, desc, nullptr);
+        return CreateReduced(desc, origin, heap, out, std::forward<Call>(call));
+    }
 
-        D3D12_RESOURCE_DESC reduced = *desc;
-        reduced.Width     = desc->Width >> skip;
-        reduced.Height    = static_cast<UINT>(desc->Height >> skip);
-        reduced.MipLevels = static_cast<UINT16>(desc->MipLevels - skip);
-        // Alignment depends on size, so a value carried over from the
-        // original desc doesn't necessarily hold for the reduced one. Falls
-        // back to full size below regardless if this (or anything else)
-        // makes D3D refuse the call, so this is defense in depth, not the
-        // only safety net.
-        reduced.Alignment = 0;
+    HRESULT STDMETHODCALLTYPE Hook_CreateCommittedResource(
+        ID3D12Device* self, const D3D12_HEAP_PROPERTIES* heapProps, D3D12_HEAP_FLAGS heapFlags,
+        const D3D12_RESOURCE_DESC* desc, D3D12_RESOURCE_STATES state,
+        const D3D12_CLEAR_VALUE* clear, REFIID riid, void** out) {
+        return CreateCommitted(heapProps, heapFlags, desc, "committed", out,
+            [&] (const D3D12_RESOURCE_DESC* d) {
+                return g_originalCreateCommittedResource(self, heapProps, heapFlags, d, state, clear, riid, out);
+            });
+    }
 
-        const HRESULT hr =
-            g_originalCreatePlacedResource(self, heap, offset, &reduced, state, clear, riid, out);
+    // Streamed textures typically go through here, not CreateCommittedResource.
+    HRESULT STDMETHODCALLTYPE Hook_CreatePlacedResource(
+        ID3D12Device* self, ID3D12Heap* heap, UINT64 offset, const D3D12_RESOURCE_DESC* desc,
+        D3D12_RESOURCE_STATES state, const D3D12_CLEAR_VALUE* clear, REFIID riid, void** out) {
+        return CreatePlaced(heap, desc, "placed", out,
+            [&] (const D3D12_RESOURCE_DESC* d) {
+                return g_originalCreatePlacedResource(self, heap, offset, d, state, clear, riid, out);
+            });
+    }
 
-        if (FAILED(hr)) {
-            const std::scoped_lock lock(g_logMutex);
-            if (g_log) {
-                fprintf(g_log, "D3D refused reduced placed %llux%u mips=%u (0x%08X), retrying at full size\n",
-                        static_cast<unsigned long long>(reduced.Width), reduced.Height, reduced.MipLevels,
-                        static_cast<unsigned>(hr));
-                fflush(g_log);
-            }
-            return g_originalCreatePlacedResource(self, heap, offset, desc, state, clear, riid, out);
-        }
+    HRESULT STDMETHODCALLTYPE Hook_CreateCommittedResource1(
+        ID3D12Device4* self, const D3D12_HEAP_PROPERTIES* heapProps, D3D12_HEAP_FLAGS heapFlags,
+        const D3D12_RESOURCE_DESC* desc, D3D12_RESOURCE_STATES state, const D3D12_CLEAR_VALUE* clear,
+        ID3D12ProtectedResourceSession* session, REFIID riid, void** out) {
+        return CreateCommitted(heapProps, heapFlags, desc, "committed1", out,
+            [&] (const D3D12_RESOURCE_DESC* d) {
+                return g_originalCreateCommittedResource1(self, heapProps, heapFlags, d, state, clear,
+                                                          session, riid, out);
+            });
+    }
 
-        LogReduction(*desc, skip, "placed", heap);
+    HRESULT STDMETHODCALLTYPE Hook_CreateCommittedResource2(
+        ID3D12Device8* self, const D3D12_HEAP_PROPERTIES* heapProps, D3D12_HEAP_FLAGS heapFlags,
+        const D3D12_RESOURCE_DESC1* desc, D3D12_RESOURCE_STATES state, const D3D12_CLEAR_VALUE* clear,
+        ID3D12ProtectedResourceSession* session, REFIID riid, void** out) {
+        return CreateCommitted(heapProps, heapFlags, desc, "committed2", out,
+            [&] (const D3D12_RESOURCE_DESC1* d) {
+                return g_originalCreateCommittedResource2(self, heapProps, heapFlags, d, state, clear,
+                                                          session, riid, out);
+            });
+    }
 
-        if (out && *out) {
-            EnsureResourceReleaseHooked(*out);
-            TrackReduced(*out, skip);
-        }
+    HRESULT STDMETHODCALLTYPE Hook_CreateCommittedResource3(
+        ID3D12Device10* self, const D3D12_HEAP_PROPERTIES* heapProps, D3D12_HEAP_FLAGS heapFlags,
+        const D3D12_RESOURCE_DESC1* desc, D3D12_BARRIER_LAYOUT layout, const D3D12_CLEAR_VALUE* clear,
+        ID3D12ProtectedResourceSession* session, UINT32 numCastableFormats,
+        const DXGI_FORMAT* castableFormats, REFIID riid, void** out) {
+        return CreateCommitted(heapProps, heapFlags, desc, "committed3", out,
+            [&] (const D3D12_RESOURCE_DESC1* d) {
+                return g_originalCreateCommittedResource3(self, heapProps, heapFlags, d, layout, clear,
+                                                          session, numCastableFormats, castableFormats,
+                                                          riid, out);
+            });
+    }
 
-        return hr;
+    HRESULT STDMETHODCALLTYPE Hook_CreatePlacedResource1(
+        ID3D12Device8* self, ID3D12Heap* heap, UINT64 offset, const D3D12_RESOURCE_DESC1* desc,
+        D3D12_RESOURCE_STATES state, const D3D12_CLEAR_VALUE* clear, REFIID riid, void** out) {
+        return CreatePlaced(heap, desc, "placed1", out,
+            [&] (const D3D12_RESOURCE_DESC1* d) {
+                return g_originalCreatePlacedResource1(self, heap, offset, d, state, clear, riid, out);
+            });
+    }
+
+    HRESULT STDMETHODCALLTYPE Hook_CreatePlacedResource2(
+        ID3D12Device10* self, ID3D12Heap* heap, UINT64 offset, const D3D12_RESOURCE_DESC1* desc,
+        D3D12_BARRIER_LAYOUT layout, const D3D12_CLEAR_VALUE* clear, UINT32 numCastableFormats,
+        const DXGI_FORMAT* castableFormats, REFIID riid, void** out) {
+        return CreatePlaced(heap, desc, "placed2", out,
+            [&] (const D3D12_RESOURCE_DESC1* d) {
+                return g_originalCreatePlacedResource2(self, heap, offset, d, layout, clear,
+                                                       numCastableFormats, castableFormats, riid, out);
+            });
     }
 
     // GetResourceAllocationInfo is deliberately left unhooked: even a pure
@@ -851,10 +915,47 @@ namespace {
                            &g_originalCreateCommandList1))
                 LogLine("[hook] CreateCommandList1 FAILED to patch, lists created that way won't have "
                         "their barriers/copies remapped");
+
+            if (!PatchSlot(device4, kSlot_CreateCommittedResource1,
+                           reinterpret_cast<void*>(&Hook_CreateCommittedResource1),
+                           &g_originalCreateCommittedResource1))
+                LogLine("[hook] CreateCommittedResource1 FAILED to patch");
             device4->Release();
         } else {
             LogLine("[hook] ID3D12Device4 unsupported, CreateCommandList1 not available, "
                     "CreateCommandList hook only");
+        }
+
+        // The DESC1 overloads, each probed the same way: patching a slot past
+        // the real vtable's end would corrupt adjacent memory.
+        ID3D12Device8* device8 = nullptr;
+        if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&device8))) && device8) {
+            if (!PatchSlot(device8, kSlot_CreateCommittedResource2,
+                           reinterpret_cast<void*>(&Hook_CreateCommittedResource2),
+                           &g_originalCreateCommittedResource2))
+                LogLine("[hook] CreateCommittedResource2 FAILED to patch");
+
+            if (!PatchSlot(device8, kSlot_CreatePlacedResource1,
+                           reinterpret_cast<void*>(&Hook_CreatePlacedResource1),
+                           &g_originalCreatePlacedResource1))
+                LogLine("[hook] CreatePlacedResource1 FAILED to patch");
+            device8->Release();
+        }
+
+        // What an engine using Enhanced Barriers creates through, the counterpart
+        // to the Barrier hook above.
+        ID3D12Device10* device10 = nullptr;
+        if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&device10))) && device10) {
+            if (!PatchSlot(device10, kSlot_CreateCommittedResource3,
+                           reinterpret_cast<void*>(&Hook_CreateCommittedResource3),
+                           &g_originalCreateCommittedResource3))
+                LogLine("[hook] CreateCommittedResource3 FAILED to patch");
+
+            if (!PatchSlot(device10, kSlot_CreatePlacedResource2,
+                           reinterpret_cast<void*>(&Hook_CreatePlacedResource2),
+                           &g_originalCreatePlacedResource2))
+                LogLine("[hook] CreatePlacedResource2 FAILED to patch");
+            device10->Release();
         }
     }
 }
