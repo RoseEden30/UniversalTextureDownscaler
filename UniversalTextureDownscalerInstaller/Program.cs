@@ -55,7 +55,7 @@ internal static class Program
         return new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);
     }
 
-    internal static bool RunElevated(string arguments)
+    internal static async Task<bool> RunElevatedAsync(string arguments)
     {
         try
         {
@@ -67,7 +67,7 @@ internal static class Program
                 Verb = "runas",
             });
             if (process is null) return false;
-            process.WaitForExit();
+            await process.WaitForExitAsync();
             return process.ExitCode == 0;
         }
         catch (Win32Exception)

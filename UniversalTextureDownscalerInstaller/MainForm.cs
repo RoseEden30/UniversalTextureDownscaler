@@ -13,7 +13,7 @@ public sealed class MainForm : Form
     private static readonly Font UiBold = new("MS Sans Serif", 8.25f, FontStyle.Bold);
 
     private static readonly int[] MaxSizeChoices = [512, 1024, 2048, 4096];
-    private const int DefaultMaxSize = 1024;
+    private const int DefaultMaxSize = 2048;  // matches the mod's own default
 
     private readonly Panel _titleBar = new() { BackColor = Navy };
     private readonly TableLayoutPanel _rows = new()
@@ -41,6 +41,9 @@ public sealed class MainForm : Form
     private readonly CheckBox _enabledBox = Check("Enabled", true);
     private readonly CheckBox _verboseBox = Check("Verbose logging", false);
 
+    private readonly RetroButton _install = new() { Text = "Install" };
+    private readonly RetroButton _remove = new() { Text = "Remove" };
+
     private GraphicsApi _detectedApi = GraphicsApi.Unknown;
 
     public MainForm()
@@ -64,10 +67,10 @@ public sealed class MainForm : Form
         var browse = new RetroButton { Text = "...", Size = new Size(em * 6, _exePathBox.Height) };
         browse.Click += (_, _) => BrowseForExe();
 
-        var install = new RetroButton { Text = "Install", Size = new Size(em * 16, 26) };
-        install.Click += (_, _) => DoInstall();
-        var remove = new RetroButton { Text = "Remove", Size = new Size(em * 16, 26) };
-        remove.Click += (_, _) => DoUninstall();
+        _install.Size = new Size(em * 16, 26);
+        _install.Click += async (_, _) => await DoInstall();
+        _remove.Size = new Size(em * 16, 26);
+        _remove.Click += async (_, _) => await DoUninstall();
         var about = new RetroButton { Text = "About", Size = new Size(em * 14, 26) };
         about.Click += (_, _) => ShowAbout();
         var exit = new RetroButton { Text = "Exit", Size = new Size(em * 12, 26) };
@@ -82,7 +85,7 @@ public sealed class MainForm : Form
         AddRow("MaxSize :", _maxSizeBox);
         AddRow("Options :", Line(_enabledBox, _verboseBox));
         AddSpan(new Panel { Height = 2, Dock = DockStyle.Fill, BackColor = Face });
-        AddRow("", Line(install, remove, about, exit));
+        AddRow("", Line(_install, _remove, about, exit));
         AddRow("", _statusLabel);
 
         BuildTitleBar();
@@ -272,7 +275,15 @@ public sealed class MainForm : Form
     private string? GameFolder() =>
         string.IsNullOrWhiteSpace(_exePathBox.Text) ? null : Path.GetDirectoryName(_exePathBox.Text);
 
-    private void DoInstall()
+    /// Keeps the window responsive while the elevated worker and its UAC prompt run.
+    private async Task<bool> RunElevated(string arguments)
+    {
+        _install.Enabled = _remove.Enabled = false;
+        try { return await Program.RunElevatedAsync(arguments); }
+        finally { _install.Enabled = _remove.Enabled = true; }
+    }
+
+    private async Task DoInstall()
     {
         var folder = GameFolder();
         if (folder is null) { ShowStatus("Pick a game .exe first.", failed: true); return; }
@@ -308,7 +319,7 @@ public sealed class MainForm : Form
             {
                 var args = $"--install-vulkan \"{folder}\" {(settings.Enabled ? 1 : 0)} "
                            + $"{settings.MaxSize} {(settings.Verbose ? 1 : 0)}";
-                if (Program.RunElevated(args)) ShowStatus($"Installed for Vulkan in \"{folder}\".");
+                if (await RunElevated(args)) ShowStatus($"Installed for Vulkan in \"{folder}\".");
                 else ShowStatus("Vulkan install needs administrator, it was cancelled or failed.", failed: true);
                 return;
             }
@@ -322,7 +333,7 @@ public sealed class MainForm : Form
         }
     }
 
-    private void DoUninstall()
+    private async Task DoUninstall()
     {
         var folder = GameFolder();
         if (folder is null) { ShowStatus("Pick a game .exe first.", failed: true); return; }
@@ -331,7 +342,7 @@ public sealed class MainForm : Form
         {
             if (Installer.IsVulkanInstalled(folder) && !Program.IsElevated())
             {
-                if (Program.RunElevated($"--uninstall-vulkan \"{folder}\"")) ShowStatus($"Removed from \"{folder}\".");
+                if (await RunElevated($"--uninstall-vulkan \"{folder}\"")) ShowStatus($"Removed from \"{folder}\".");
                 else ShowStatus("Vulkan uninstall needs administrator, it was cancelled or failed.", failed: true);
                 return;
             }
