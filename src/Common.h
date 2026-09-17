@@ -48,7 +48,7 @@ inline std::wstring HostDirectory() { return DirectoryOf(nullptr); }
 
 // logging
 
-inline constexpr char kVersion[] = "1.0.0";  // keep in sync with version.rc
+inline constexpr char kVersion[] = "1.1.0";  // keep in sync with version.rc
 
 inline std::mutex g_logMutex;
 inline FILE* g_log = nullptr;

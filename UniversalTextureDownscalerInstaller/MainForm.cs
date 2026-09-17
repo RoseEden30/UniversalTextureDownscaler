@@ -21,6 +21,9 @@ public sealed class MainForm : Form
     private readonly Button _uninstallButton = new() { Text = "Uninstall", Location = new Point(120, 184), Size = new Size(100, 28) };
     private readonly Label _statusLabel = new() { Location = new Point(12, 220), Size = new Size(430, 40), AutoSize = false };
 
+    private static readonly string[] MaxSizeChoices = ["512", "1024", "2048", "4096"];
+    private const int DefaultMaxSize = 1024;
+
     private GraphicsApi _detectedApi = GraphicsApi.Unknown;
 
     public MainForm()
@@ -36,8 +39,7 @@ public sealed class MainForm : Form
         browseButton.Click += (_, _) => BrowseForExe();
 
         var maxSizeLabel = new Label { Text = "MaxSize:", Location = new Point(12, 129), AutoSize = true };
-        _maxSizeBox.Items.AddRange(["512", "1024", "2048", "4096"]);
-        _maxSizeBox.SelectedItem = "1024";
+        SelectMaxSize(DefaultMaxSize);
 
         _installButton.Click += (_, _) => DoInstall();
         _uninstallButton.Click += (_, _) => DoUninstall();
@@ -64,6 +66,35 @@ public sealed class MainForm : Form
         var exePath = ApiDetect.ResolveRealExecutable(dialog.FileName);
         _exePathBox.Text = exePath;
         SetDetected(ApiDetect.Detect(exePath));
+        LoadExistingState();
+    }
+
+    // Without this, reinstalling would silently reset a game's settings to the defaults.
+    private void LoadExistingState()
+    {
+        var folder = GameFolder();
+        if (folder is null) return;
+
+        if (Installer.ReadSettings(folder) is { } settings)
+        {
+            _enabledBox.Checked = settings.Enabled;
+            _verboseBox.Checked = settings.Verbose;
+            SelectMaxSize(settings.MaxSize);
+        }
+
+        var installed = Installer.InstalledApi(folder);
+        ShowStatus(installed is null
+            ? "Not set up here yet."
+            : $"Already installed for {ApiName(installed.Value)}, showing its current settings.");
+    }
+
+    private void SelectMaxSize(int value)
+    {
+        var text = value.ToString();
+        _maxSizeBox.Items.Clear();
+        _maxSizeBox.Items.AddRange(MaxSizeChoices);
+        if (!MaxSizeChoices.Contains(text)) _maxSizeBox.Items.Add(text);  // hand-edited ini
+        _maxSizeBox.SelectedItem = text;
     }
 
     private void SetDetected(GraphicsApi api)

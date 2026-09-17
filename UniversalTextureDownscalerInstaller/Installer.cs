@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using Microsoft.Win32;
 
 namespace UniversalTextureDownscalerInstaller;
@@ -14,6 +15,8 @@ public static class Installer
 
     /// Matches the ProductName in src/version.rc, compiled into both binaries.
     private const string ProductMarker = "UniversalTextureDownscaler";
+
+    private const string IniName = "UniversalTextureDownscaler.ini";
 
     /// The D3D proxy deploys under a name other mods use too, so a file existing
     /// there doesn't mean this tool put it there, overwriting or deleting someone
@@ -53,6 +56,35 @@ public static class Installer
         Path.Combine(SharedVulkanDirectory(), "InstalledGames.txt");
 
     public static bool IsVulkanInstalled(string gameFolder) => ReadInstalledGames().Contains(gameFolder);
+
+    /// Which API this tool is already set up for in a game folder, null if none.
+    public static GraphicsApi? InstalledApi(string gameFolder)
+    {
+        if (IsOurs(Path.Combine(gameFolder, "d3d12.dll"))) return GraphicsApi.D3D12;
+        if (IsOurs(Path.Combine(gameFolder, "d3d11.dll"))) return GraphicsApi.D3D11;
+        if (IsVulkanInstalled(gameFolder)) return GraphicsApi.Vulkan;
+        return null;
+    }
+
+    /// The settings already written next to a game's exe, null if it has no ini.
+    /// Read through GetPrivateProfileInt, the same call the mod itself uses.
+    public static InstallSettings? ReadSettings(string gameFolder)
+    {
+        var path = Path.Combine(gameFolder, IniName);
+        if (!File.Exists(path)) return null;
+
+        return new InstallSettings(
+            ReadIniInt(path, "Enabled", 1) != 0,
+            ReadIniInt(path, "MaxSize", 2048),
+            ReadIniInt(path, "Verbose", 0) != 0);
+    }
+
+    // GetFullPath: a relative path would resolve against the Windows directory.
+    private static int ReadIniInt(string path, string key, int fallback) =>
+        (int)GetPrivateProfileIntW("Settings", key, fallback, Path.GetFullPath(path));
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern uint GetPrivateProfileIntW(string section, string key, int nDefault, string path);
 
     private static HashSet<string> ReadInstalledGames()
     {
@@ -106,7 +138,7 @@ public static class Installer
             if (IsOurs(path)) TryDelete(path);
             else leftAlone.Add(name);
         }
-        TryDelete(Path.Combine(gameFolder, "UniversalTextureDownscaler.ini"));
+        TryDelete(Path.Combine(gameFolder, IniName));
 
         var games = ReadInstalledGames();
         if (games.Remove(gameFolder))
@@ -155,6 +187,12 @@ public static class Installer
 
     private static void WriteIni(string gameFolder, InstallSettings settings)
     {
+        var path = Path.Combine(gameFolder, IniName);
+
+        // Carried over, not reset: it has no UI, so a hand-set value would be
+        // lost on every reinstall.
+        var fakeVramBudgetMB = File.Exists(path) ? ReadIniInt(path, "FakeVramBudgetMB", 0) : 0;
+
         var lines = new[]
         {
             "[Settings]",
@@ -165,9 +203,9 @@ public static class Installer
             "; logs every texture candidate and why it was accepted/rejected, noisy, for troubleshooting",
             $"Verbose={(settings.Verbose ? 1 : 0)}",
             "; caps the VRAM budget the game itself sees, in MB, 0 disables this (testing only)",
-            "FakeVramBudgetMB=0",
+            $"FakeVramBudgetMB={fakeVramBudgetMB}",
         };
-        File.WriteAllLines(Path.Combine(gameFolder, "UniversalTextureDownscaler.ini"), lines);
+        File.WriteAllLines(path, lines);
     }
 
     private static void TryDelete(string path)
