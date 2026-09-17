@@ -1,57 +1,207 @@
+using System.Runtime.InteropServices;
+
 namespace UniversalTextureDownscalerInstaller;
 
 public sealed class MainForm : Form
 {
-    private readonly TextBox _exePathBox = new() { ReadOnly = true, Location = new Point(12, 34), Size = new Size(336, 23) };
-    private readonly Label _detectedLabel = new() { Location = new Point(12, 68), AutoSize = true, Font = new Font(Control.DefaultFont, FontStyle.Bold) };
+    private static readonly Color Face = Color.FromArgb(198, 198, 198);
+    private static readonly Color Navy = Color.FromArgb(0, 0, 128);
+    private static readonly Color Ink = Color.Black;
+    private static readonly Color Good = Color.FromArgb(0, 100, 0);
+    private static readonly Color Bad = Color.FromArgb(160, 0, 0);
+    private static readonly Font Ui = new("MS Sans Serif", 8.25f);
+    private static readonly Font UiBold = new("MS Sans Serif", 8.25f, FontStyle.Bold);
 
-    private readonly RadioButton _rbAuto = new() { Text = "Auto (detected)", Location = new Point(12, 94), AutoSize = true, Checked = true };
-    private readonly RadioButton _rbD3D11 = new() { Text = "DirectX 11", Location = new Point(140, 94), AutoSize = true };
-    private readonly RadioButton _rbD3D12 = new() { Text = "DirectX 12", Location = new Point(240, 94), AutoSize = true };
-    private readonly RadioButton _rbVulkan = new() { Text = "Vulkan", Location = new Point(340, 94), AutoSize = true };
+    private static readonly int[] MaxSizeChoices = [512, 1024, 2048, 4096];
+    private const int DefaultMaxSize = 1024;
 
+    private readonly Panel _titleBar = new() { BackColor = Navy };
+    private readonly TableLayoutPanel _rows = new()
+    {
+        AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 2,
+        Padding = new Padding(12, 10, 12, 8), BackColor = Face,
+    };
+
+    private readonly TextBox _exePathBox = new()
+    {
+        ReadOnly = true, BorderStyle = BorderStyle.Fixed3D, BackColor = Color.White, Font = Ui,
+    };
+    private readonly Label _detectedLabel = Caption("");
+    private readonly Label _statusLabel = Caption("");
+
+    private readonly RadioButton _rbAuto = Radio("auto", true);
+    private readonly RadioButton _rbD3D11 = Radio("d3d11", false);
+    private readonly RadioButton _rbD3D12 = Radio("d3d12", false);
+    private readonly RadioButton _rbVulkan = Radio("vulkan", false);
     private readonly ComboBox _maxSizeBox = new()
     {
-        Location = new Point(110, 126), Size = new Size(90, 23), DropDownStyle = ComboBoxStyle.DropDownList,
+        FlatStyle = FlatStyle.System, BackColor = Color.White, Font = Ui,
+        DropDownStyle = ComboBoxStyle.DropDownList,
     };
-    private readonly CheckBox _enabledBox = new() { Text = "Enabled", Location = new Point(12, 158), AutoSize = true, Checked = true };
-    private readonly CheckBox _verboseBox = new() { Text = "Verbose logging (large log files)", Location = new Point(110, 158), AutoSize = true };
-
-    private readonly Button _installButton = new() { Text = "Install", Location = new Point(12, 184), Size = new Size(100, 28) };
-    private readonly Button _uninstallButton = new() { Text = "Uninstall", Location = new Point(120, 184), Size = new Size(100, 28) };
-    private readonly Label _statusLabel = new() { Location = new Point(12, 220), Size = new Size(430, 40), AutoSize = false };
-
-    private static readonly string[] MaxSizeChoices = ["512", "1024", "2048", "4096"];
-    private const int DefaultMaxSize = 1024;
+    private readonly CheckBox _enabledBox = Check("Enabled", true);
+    private readonly CheckBox _verboseBox = Check("Verbose logging", false);
 
     private GraphicsApi _detectedApi = GraphicsApi.Unknown;
 
     public MainForm()
     {
-        Text = "UniversalTextureDownscaler Installer";
-        FormBorderStyle = FormBorderStyle.FixedDialog;
-        MaximizeBox = false;
-        ClientSize = new Size(460, 270);
+        Text = "UniversalTextureDownscaler";
+        BackColor = Face;
+        ForeColor = Ink;
+        Font = Ui;
+        FormBorderStyle = FormBorderStyle.None;
         StartPosition = FormStartPosition.CenterScreen;
+        DoubleBuffered = true;
+        // Sizes come from measured text, not pixel constants, so the window fits
+        // its content at any DPI.
+        AutoScaleMode = AutoScaleMode.Dpi;
 
-        var exeLabel = new Label { Text = "Game .exe:", Location = new Point(12, 16), AutoSize = true };
-        var browseButton = new Button { Text = "Browse...", Location = new Point(356, 33), Size = new Size(92, 25) };
-        browseButton.Click += (_, _) => BrowseForExe();
+        var em = TextRenderer.MeasureText("0", Ui).Width;
+        _exePathBox.Width = em * 52;
+        _maxSizeBox.Width = em * 12;
+        _statusLabel.MaximumSize = new Size(em * 64, 0);
 
-        var maxSizeLabel = new Label { Text = "MaxSize:", Location = new Point(12, 129), AutoSize = true };
+        var browse = new RetroButton { Text = "...", Size = new Size(em * 6, _exePathBox.Height) };
+        browse.Click += (_, _) => BrowseForExe();
+
+        var install = new RetroButton { Text = "Install", Size = new Size(em * 16, 26) };
+        install.Click += (_, _) => DoInstall();
+        var remove = new RetroButton { Text = "Remove", Size = new Size(em * 16, 26) };
+        remove.Click += (_, _) => DoUninstall();
+        var about = new RetroButton { Text = "About", Size = new Size(em * 14, 26) };
+        about.Click += (_, _) => ShowAbout();
+        var exit = new RetroButton { Text = "Exit", Size = new Size(em * 12, 26) };
+        exit.Click += (_, _) => Close();
+
         SelectMaxSize(DefaultMaxSize);
-
-        _installButton.Click += (_, _) => DoInstall();
-        _uninstallButton.Click += (_, _) => DoUninstall();
-
-        Controls.AddRange([
-            exeLabel, _exePathBox, browseButton, _detectedLabel,
-            _rbAuto, _rbD3D11, _rbD3D12, _rbVulkan,
-            maxSizeLabel, _maxSizeBox, _enabledBox, _verboseBox,
-            _installButton, _uninstallButton, _statusLabel,
-        ]);
-
         SetDetected(GraphicsApi.Unknown);
+
+        AddRow("Game .exe :", Line(_exePathBox, browse));
+        AddRow("", _detectedLabel);
+        AddRow("API :", Line(_rbAuto, _rbD3D11, _rbD3D12, _rbVulkan));
+        AddRow("MaxSize :", _maxSizeBox);
+        AddRow("Options :", Line(_enabledBox, _verboseBox));
+        AddSpan(new Panel { Height = 2, Dock = DockStyle.Fill, BackColor = Face });
+        AddRow("", Line(install, remove, about, exit));
+        AddRow("", _statusLabel);
+
+        BuildTitleBar();
+        Controls.Add(_rows);
+        _rows.PerformLayout();
+
+        var body = _rows.PreferredSize;
+        _titleBar.Size = new Size(body.Width, TextRenderer.MeasureText("X", UiBold).Height + 8);
+        _titleBar.Location = new Point(4, 4);
+        _rows.Location = new Point(4, _titleBar.Bottom);
+        ClientSize = new Size(body.Width + 8, _titleBar.Height + body.Height + 8);
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        base.OnPaint(e);
+        ControlPaint.DrawBorder3D(e.Graphics, ClientRectangle, Border3DStyle.Raised);
+    }
+
+    private void BuildTitleBar()
+    {
+        var title = new Label
+        {
+            Text = "  UniversalTextureDownscaler", ForeColor = Color.White, Font = UiBold,
+            AutoSize = false, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft,
+        };
+        _titleBar.Controls.Add(title);
+        _titleBar.MouseDown += DragWindow;
+        title.MouseDown += DragWindow;
+        Controls.Add(_titleBar);
+    }
+
+    // layout
+
+    private void AddSpan(Control content)
+    {
+        _rows.Controls.Add(content, 0, _rows.RowCount);
+        _rows.SetColumnSpan(content, 2);
+        _rows.RowCount++;
+    }
+
+    private void AddRow(string label, Control content)
+    {
+        var caption = Caption(label);
+        caption.Margin = new Padding(0, 6, 10, 4);
+        caption.Anchor = AnchorStyles.Left;
+        content.Margin = new Padding(0, 4, 0, 4);
+        content.Anchor = AnchorStyles.Left;
+
+        _rows.Controls.Add(caption, 0, _rows.RowCount);
+        _rows.Controls.Add(content, 1, _rows.RowCount);
+        _rows.RowCount++;
+    }
+
+    private static FlowLayoutPanel Line(params Control[] controls)
+    {
+        var line = new FlowLayoutPanel
+        {
+            AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, BackColor = Face,
+        };
+        foreach (var control in controls)
+        {
+            control.Margin = new Padding(0, 0, 6, 0);
+            line.Controls.Add(control);
+        }
+        return line;
+    }
+
+    private static Label Caption(string text) => new()
+    {
+        Text = text, AutoSize = true, ForeColor = Ink, BackColor = Face, Font = Ui,
+    };
+
+    private static RadioButton Radio(string text, bool @checked) => new()
+    {
+        Text = text, Checked = @checked, AutoSize = true, ForeColor = Ink, BackColor = Face,
+        FlatStyle = FlatStyle.System, Font = Ui,
+    };
+
+    private static CheckBox Check(string text, bool @checked) => new()
+    {
+        Text = text, Checked = @checked, AutoSize = true, ForeColor = Ink, BackColor = Face,
+        FlatStyle = FlatStyle.System, Font = Ui,
+    };
+
+    // behaviour
+
+    private void ShowAbout()
+    {
+        var version = Application.ProductVersion.Split('+')[0];
+        var text = new Label
+        {
+            AutoSize = true, ForeColor = Ink, BackColor = Face, Font = Ui, Location = new Point(14, 12),
+            Text = $"""
+                   UniversalTextureDownscaler {version}
+                   MIT licensed
+
+                   Credits
+                     TextureDownscaler   github.com/RoseEden30/TextureDownscaler
+                     ReShade             github.com/crosire/reshade
+                   """,
+        };
+        var close = new RetroButton { Text = "Close", Size = new Size(90, 26) };
+
+        using var dialog = new Form
+        {
+            Text = "About", Font = Ui, BackColor = Face, ForeColor = Ink,
+            FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false, MinimizeBox = false,
+            StartPosition = FormStartPosition.CenterParent, AutoScaleMode = AutoScaleMode.Dpi,
+        };
+        close.Click += (_, _) => dialog.Close();
+        dialog.CancelButton = close;
+
+        var body = text.PreferredSize;
+        close.Location = new Point(14, 12 + body.Height + 14);
+        dialog.ClientSize = new Size(body.Width + 28, close.Bottom + 14);
+        dialog.Controls.Add(text);
+        dialog.Controls.Add(close);
+        dialog.ShowDialog(this);
     }
 
     private void BrowseForExe()
@@ -69,7 +219,7 @@ public sealed class MainForm : Form
         LoadExistingState();
     }
 
-    // Without this, reinstalling would silently reset a game's settings to the defaults.
+    // Without this, reinstalling would reset a game's settings to the defaults.
     private void LoadExistingState()
     {
         var folder = GameFolder();
@@ -90,20 +240,19 @@ public sealed class MainForm : Form
 
     private void SelectMaxSize(int value)
     {
-        var text = value.ToString();
+        var choices = MaxSizeChoices.Contains(value) ? MaxSizeChoices : [.. MaxSizeChoices, value];
         _maxSizeBox.Items.Clear();
-        _maxSizeBox.Items.AddRange(MaxSizeChoices);
-        if (!MaxSizeChoices.Contains(text)) _maxSizeBox.Items.Add(text);  // hand-edited ini
-        _maxSizeBox.SelectedItem = text;
+        foreach (var choice in choices.Order()) _maxSizeBox.Items.Add(choice.ToString());
+        _maxSizeBox.SelectedItem = value.ToString();
     }
 
     private void SetDetected(GraphicsApi api)
     {
         _detectedApi = api;
         _detectedLabel.Text = api == GraphicsApi.Unknown
-            ? "Detected API: unknown, pick one below"
-            : $"Detected API: {ApiName(api)}";
-        _rbAuto.Text = api == GraphicsApi.Unknown ? "Auto (unknown)" : $"Auto ({ApiName(api)})";
+            ? "Detected: unknown, pick one below"
+            : $"Detected: {ApiName(api)}";
+        _rbAuto.Text = api == GraphicsApi.Unknown ? "auto" : $"auto ({ApiName(api)})";
     }
 
     private GraphicsApi SelectedApi() =>
@@ -126,12 +275,12 @@ public sealed class MainForm : Form
     private void DoInstall()
     {
         var folder = GameFolder();
-        if (folder is null) { ShowStatus("Pick a game .exe first."); return; }
+        if (folder is null) { ShowStatus("Pick a game .exe first.", failed: true); return; }
 
         var api = SelectedApi();
         if (api == GraphicsApi.Unknown)
         {
-            ShowStatus("Couldn't detect the API automatically, pick DirectX 11/12 or Vulkan above.");
+            ShowStatus("Couldn't detect the API, pick DirectX 11/12 or Vulkan above.", failed: true);
             return;
         }
 
@@ -159,9 +308,8 @@ public sealed class MainForm : Form
             {
                 var args = $"--install-vulkan \"{folder}\" {(settings.Enabled ? 1 : 0)} "
                            + $"{settings.MaxSize} {(settings.Verbose ? 1 : 0)}";
-                ShowStatus(Program.RunElevated(args)
-                    ? $"Installed for Vulkan in \"{folder}\"."
-                    : "Vulkan install needs administrator, it was cancelled or failed.");
+                if (Program.RunElevated(args)) ShowStatus($"Installed for Vulkan in \"{folder}\".");
+                else ShowStatus("Vulkan install needs administrator, it was cancelled or failed.", failed: true);
                 return;
             }
 
@@ -170,22 +318,21 @@ public sealed class MainForm : Form
         }
         catch (Exception ex)
         {
-            ShowStatus($"Install failed: {ex.Message}");
+            ShowStatus($"Install failed: {ex.Message}", failed: true);
         }
     }
 
     private void DoUninstall()
     {
         var folder = GameFolder();
-        if (folder is null) { ShowStatus("Pick a game .exe first."); return; }
+        if (folder is null) { ShowStatus("Pick a game .exe first.", failed: true); return; }
 
         try
         {
             if (Installer.IsVulkanInstalled(folder) && !Program.IsElevated())
             {
-                ShowStatus(Program.RunElevated($"--uninstall-vulkan \"{folder}\"")
-                    ? $"Removed from \"{folder}\"."
-                    : "Vulkan uninstall needs administrator, it was cancelled or failed.");
+                if (Program.RunElevated($"--uninstall-vulkan \"{folder}\"")) ShowStatus($"Removed from \"{folder}\".");
+                else ShowStatus("Vulkan uninstall needs administrator, it was cancelled or failed.", failed: true);
                 return;
             }
 
@@ -197,9 +344,53 @@ public sealed class MainForm : Form
         }
         catch (Exception ex)
         {
-            ShowStatus($"Uninstall failed: {ex.Message}");
+            ShowStatus($"Uninstall failed: {ex.Message}", failed: true);
         }
     }
 
-    private void ShowStatus(string message) => _statusLabel.Text = message;
+    private void ShowStatus(string message, bool failed = false)
+    {
+        _statusLabel.ForeColor = failed ? Bad : Good;
+        _statusLabel.Text = message;
+    }
+
+    [DllImport("user32.dll")] private static extern bool ReleaseCapture();
+    [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr wParam, IntPtr lParam);
+
+    private void DragWindow(object? sender, MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Left) return;
+        ReleaseCapture();
+        SendMessage(Handle, 0xA1, 0x2, 0);  // WM_NCLBUTTONDOWN, HTCAPTION
+    }
+
+    /// A classic Win9x raised/pushed button, drawn by hand so it keeps its bevel on any Windows theme.
+    private sealed class RetroButton : Button
+    {
+        private bool _down;
+
+        public RetroButton()
+        {
+            FlatStyle = FlatStyle.Flat;
+            FlatAppearance.BorderSize = 0;
+            BackColor = Face;
+            Font = UiBold;
+            SetStyle(ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer, true);
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e) { _down = true; Invalidate(); base.OnMouseDown(e); }
+        protected override void OnMouseUp(MouseEventArgs e) { _down = false; Invalidate(); base.OnMouseUp(e); }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            g.Clear(Face);
+            ControlPaint.DrawButton(g, ClientRectangle, _down ? ButtonState.Pushed : ButtonState.Normal);
+
+            var text = ClientRectangle;
+            if (_down) text.Offset(1, 1);
+            TextRenderer.DrawText(g, Text, Font, text, Enabled ? Ink : SystemColors.GrayText,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+        }
+    }
 }

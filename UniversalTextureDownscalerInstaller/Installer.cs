@@ -66,8 +66,8 @@ public static class Installer
         return null;
     }
 
-    /// The settings already written next to a game's exe, null if it has no ini.
-    /// Read through GetPrivateProfileInt, the same call the mod itself uses.
+    /// Settings already written next to a game's exe, null if it has no ini.
+    /// Read with GetPrivateProfileInt, the call the mod itself uses.
     public static InstallSettings? ReadSettings(string gameFolder)
     {
         var path = Path.Combine(gameFolder, IniName);
@@ -189,8 +189,7 @@ public static class Installer
     {
         var path = Path.Combine(gameFolder, IniName);
 
-        // Carried over, not reset: it has no UI, so a hand-set value would be
-        // lost on every reinstall.
+        // Carried over, not reset: it has no UI, so it would be lost otherwise.
         var fakeVramBudgetMB = File.Exists(path) ? ReadIniInt(path, "FakeVramBudgetMB", 0) : 0;
 
         var lines = new[]

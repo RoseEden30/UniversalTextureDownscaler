@@ -14,9 +14,8 @@ internal static class Program
         // against real game exes without clicking through the GUI.
         if (args.Length >= 2 && args[0] == "--detect")
         {
-            // AttachConsole replaces the standard handles, so it must not run
-            // when this GUI-subsystem process already has one (output piped to
-            // a file, which is how the check is usually scripted).
+            // AttachConsole replaces the standard handles, so skip it when
+            // output is already redirected.
             if (GetStdHandle(StdOutputHandle) == IntPtr.Zero) AttachConsole(-1);
             var exePath = ApiDetect.ResolveRealExecutable(args[1]);
             Console.WriteLine($"{exePath} -> {ApiDetect.Detect(exePath)}");
