@@ -24,9 +24,9 @@
 // (the file name is ours to choose; "VK_LAYER_" is the convention for the
 // logical layer name inside the manifest, not the file on disk). The
 // installer registers the manifest's path under
-// HKCU\Software\Khronos\Vulkan\ImplicitLayers, per-user rather than
-// machine-wide; disable_environment (DISABLE_UNIVERSALTEXTUREDOWNSCALER=1) turns it
-// off for one launch without unregistering.
+// HKLM\Software\Khronos\Vulkan\ImplicitLayers; disable_environment
+// (DISABLE_UNIVERSALTEXTUREDOWNSCALER=1) turns it off for one launch without
+// unregistering.
 
 #include "Common.h"
 
@@ -275,7 +275,9 @@ namespace {
         PFN_vkCmdPipelineBarrier2 realPipelineBarrier2      = nullptr;
     };
 
-    std::mutex g_devicesMutex;
+    // shared_mutex, not mutex: written only on device create/destroy, read on
+    // every intercepted vkCmd* call from every recording thread.
+    std::shared_mutex g_devicesMutex;
     std::unordered_map<void*, DeviceState> g_devices;  // keyed by DispatchKey
 
     // Command buffers share their owning device's dispatch key, so this
@@ -283,7 +285,7 @@ namespace {
     // ones that receive a VkDevice directly.
     DeviceState* StateFor(const void* dispatchableHandle) {
         if (!dispatchableHandle) return nullptr;
-        const std::scoped_lock lock(g_devicesMutex);
+        const std::shared_lock lock(g_devicesMutex);
         const auto it = g_devices.find(DispatchKey(dispatchableHandle));
         return it != g_devices.end() ? &it->second : nullptr;
     }
@@ -1052,7 +1054,7 @@ namespace {
         // held, since it runs arbitrary code from another layer.
         PFN_vkGetDeviceProcAddr down = nullptr;
         {
-            const std::scoped_lock lock(g_devicesMutex);
+            const std::shared_lock lock(g_devicesMutex);
             const auto it = g_devices.find(DispatchKey(device));
             if (it == g_devices.end()) return nullptr;
 
@@ -1072,6 +1074,10 @@ namespace {
         if (!pName) return nullptr;
         if (auto* chain = LookupChainFunction(pName)) return chain;
 
+        // With no instance, only the global commands above are answerable;
+        // everything else must resolve to null per the spec.
+        if (!instance) return nullptr;
+
         const bool active = g_active.load(std::memory_order_relaxed);
 
         // A device-level name can legitimately be asked for here before any
@@ -1080,8 +1086,6 @@ namespace {
         if (active)
             for (const auto& hook : kDeviceHooks)
                 if (NameMatches(hook, pName)) return hook.fn;
-
-        if (!instance) return nullptr;
 
         PFN_vkGetInstanceProcAddr down = nullptr;
         bool hasMemoryProperties2      = false;

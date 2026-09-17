@@ -30,7 +30,7 @@ execute_process(
             -OutFile "${D3D12_DEF}"
             -RealDllName "d3d12.dll"
             -LibraryName "d3d12"
-            -Exports "D3D12CreateDevice,D3D12GetDebugInterface,D3D12SerializeRootSignature,D3D12SerializeVersionedRootSignature,D3D12CreateRootSignatureDeserializer,D3D12CreateVersionedRootSignatureDeserializer,D3D12EnableExperimentalFeatures"
+            -Exports "D3D12CreateDevice,D3D12GetDebugInterface,D3D12GetInterface,D3D12SerializeRootSignature,D3D12SerializeVersionedRootSignature,D3D12CreateRootSignatureDeserializer,D3D12CreateVersionedRootSignatureDeserializer,D3D12EnableExperimentalFeatures"
     RESULT_VARIABLE GENERATE_D3D12_DEF_RESULT
     OUTPUT_VARIABLE GENERATE_D3D12_DEF_OUTPUT
     ERROR_VARIABLE GENERATE_D3D12_DEF_OUTPUT
@@ -48,7 +48,7 @@ execute_process(
             -OutFile "${D3D11_DEF}"
             -RealDllName "d3d11.dll"
             -LibraryName "d3d11"
-            -Exports "D3D11CreateDevice,D3D11CreateDeviceAndSwapChain"
+            -Exports "D3D11CreateDevice,D3D11CreateDeviceAndSwapChain,D3D11On12CreateDevice"
     RESULT_VARIABLE GENERATE_D3D11_DEF_RESULT
     OUTPUT_VARIABLE GENERATE_D3D11_DEF_OUTPUT
     ERROR_VARIABLE GENERATE_D3D11_DEF_OUTPUT

@@ -42,6 +42,17 @@ the reduced size falls back to the original, full-size resource.
 
 - **Virtual-texturing tile pools** (common in UE5 titles): tiles are small
   and fixed-size by design, so `MaxSize` has nothing to reduce on them.
+- **D3D12 placed resources** (`CreatePlacedResource`, the usual path for
+  streamed textures): the reduction happens, but the engine sized the heap
+  it places into from `GetResourceAllocationInfo` on the *original* desc, and
+  that call is deliberately left unhooked (see D3D12Hooks.cpp for why), so
+  the heap doesn't shrink with the resource. Real savings there come from the
+  committed-resource path, which most engines use for the large textures
+  anyway. The log's "MB saved" counts both, so treat it as an upper bound and
+  trust the VRAM figure next to it.
+- **DirectStorage**: textures streamed straight to the GPU by subresource
+  index bypass every hook here, so a reduced texture filled that way can come
+  out wrong. The log calls it out once if `dstorage.dll` is loaded.
 - **HITMAN 3 (Glacier engine)**: reduction runs cleanly but causes visible
   texture corruption. Likely Glacier's own cached texture metadata going
   stale, unrelated to what the resource reports. Out of scope.

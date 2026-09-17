@@ -8,14 +8,15 @@
 // subresource index remapped.
 //
 // Proxies d3d11.dll next to the game's exe, loading the real one from
-// System32. Only the two commonly-used entry points are exported (pinned
-// to their real ordinals, see generate_def.ps1); everything else is left
-// unexported, which fails safely if anything looks for it.
+// System32. Only the documented entry points are exported (pinned to their
+// real ordinals, see generate_def.ps1); the undocumented D3D11Core*/D3DKMT*
+// ones are left unexported, which fails safely if anything looks for them.
 
 #include "Common.h"
 
 #include <d3d11.h>
 #include <d3d11_1.h>
+#include <d3d11on12.h>
 
 #include <mutex>
 #include <shared_mutex>
@@ -35,6 +36,7 @@ namespace {
 
     PFN_D3D11_CREATE_DEVICE g_realCreateDevice                     = nullptr;
     PFN_D3D11_CREATE_DEVICE_AND_SWAP_CHAIN g_realCreateDeviceAndSwapChain = nullptr;
+    PFN_D3D11ON12_CREATE_DEVICE g_realOn12CreateDevice             = nullptr;
 
     // Loaded lazily, never from DllMain, since loading a DLL while the loader
     // lock is held risks a deadlock.
@@ -58,6 +60,7 @@ namespace {
             g_realCreateDevice = LoadReal<PFN_D3D11_CREATE_DEVICE>("D3D11CreateDevice");
             g_realCreateDeviceAndSwapChain =
                 LoadReal<PFN_D3D11_CREATE_DEVICE_AND_SWAP_CHAIN>("D3D11CreateDeviceAndSwapChain");
+            g_realOn12CreateDevice = LoadReal<PFN_D3D11ON12_CREATE_DEVICE>("D3D11On12CreateDevice");
         });
     }
 
@@ -157,13 +160,15 @@ namespace {
 
     using Release_t = ULONG(STDMETHODCALLTYPE*)(IUnknown*);
 
-    std::mutex g_releaseHooksMutex;
+    // shared_mutex, not mutex: written once per distinct vtable, read on every
+    // Release of every resource sharing it.
+    std::shared_mutex g_releaseHooksMutex;
     std::unordered_map<void*, Release_t> g_originalReleaseByVtable;  // vtable -> original Release
 
     ULONG STDMETHODCALLTYPE Hook_Release(IUnknown* self) {
         Release_t original = nullptr;
         {
-            const std::scoped_lock lock(g_releaseHooksMutex);
+            const std::shared_lock lock(g_releaseHooksMutex);
             const auto it = g_originalReleaseByVtable.find(VtableOf(self));
             if (it != g_originalReleaseByVtable.end()) original = it->second;
         }
@@ -198,9 +203,9 @@ namespace {
         const std::scoped_lock lock(g_releaseHooksMutex);
         if (g_originalReleaseByVtable.count(vtable)) return;
 
-        void* original = nullptr;
+        Release_t original = nullptr;
         if (PatchSlot(resource, kSlot_Release, reinterpret_cast<void*>(&Hook_Release), &original))
-            g_originalReleaseByVtable[vtable] = reinterpret_cast<Release_t>(original);
+            g_originalReleaseByVtable[vtable] = original;
     }
 
     // ID3D11Device::CreateTexture2D
@@ -275,7 +280,24 @@ namespace {
     // ID3D11Device::CreateShaderResourceView
     // Remaps MostDetailedMip/MipLevels the same way UpdateSubresource and
     // CopySubresourceRegion are remapped below: subtract skip, clamp to what
-    // the reduced resource actually has.
+    // the reduced resource actually has. Left unclamped, a view naming more
+    // levels than the reduced chain has is simply refused by D3D and the app
+    // ends up with no view at all.
+
+    // Clamps to at least one level rather than signalling "empty": a view
+    // creation call has to return something valid.
+    void ClampViewMips(UINT& mostDetailedMip, UINT& mipLevels, std::uint32_t skip) {
+        const UINT originalMost = mostDetailedMip;
+        mostDetailedMip         = originalMost >= skip ? originalMost - skip : 0;
+
+        if (mipLevels == static_cast<UINT>(-1)) return;  // "all remaining levels", stays correct as is
+
+        // 64-bit so MostDetailedMip+MipLevels can't wrap; the result is
+        // bounded by the original level count and fits back in UINT.
+        const std::uint64_t originalEnd = static_cast<std::uint64_t>(originalMost) + mipLevels;
+        const std::uint64_t newEnd      = originalEnd >= skip ? originalEnd - skip : 0;
+        mipLevels = newEnd > mostDetailedMip ? static_cast<UINT>(newEnd - mostDetailedMip) : 1;
+    }
 
     using CreateSRV_t = HRESULT(STDMETHODCALLTYPE*)(
         ID3D11Device*, ID3D11Resource*, const D3D11_SHADER_RESOURCE_VIEW_DESC*, ID3D11ShaderResourceView**);
@@ -286,23 +308,21 @@ namespace {
         ID3D11Device* self, ID3D11Resource* resource, const D3D11_SHADER_RESOURCE_VIEW_DESC* desc,
         ID3D11ShaderResourceView** out) {
         const auto skip = SkipFor(resource);
-        if (skip == 0 || !desc || desc->ViewDimension != D3D11_SRV_DIMENSION_TEXTURE2D)
-            return g_originalCreateSRV(self, resource, desc, out);
+        if (skip == 0 || !desc) return g_originalCreateSRV(self, resource, desc, out);
 
+        // TEXTURE2DARRAY too, not just TEXTURE2D: a reduced texture always has
+        // ArraySize==1, but engines that describe every 2D texture through the
+        // array dimension are common enough.
         D3D11_SHADER_RESOURCE_VIEW_DESC clamped = *desc;
-        auto& tex                                = clamped.Texture2D;
-
-        const UINT originalMost = tex.MostDetailedMip;
-        tex.MostDetailedMip     = originalMost >= skip ? originalMost - skip : 0;
-
-        if (tex.MipLevels != static_cast<UINT>(-1)) {
-            // 64-bit so MostDetailedMip+MipLevels can't wrap; the result is
-            // bounded by the original level count and fits back in UINT.
-            const std::uint64_t originalEnd = static_cast<std::uint64_t>(originalMost) + tex.MipLevels;
-            const std::uint64_t newEnd      = originalEnd >= skip ? originalEnd - skip : 0;
-            tex.MipLevels                   = newEnd > tex.MostDetailedMip
-                                                  ? static_cast<UINT>(newEnd - tex.MostDetailedMip)
-                                                  : 1;
+        switch (desc->ViewDimension) {
+            case D3D11_SRV_DIMENSION_TEXTURE2D:
+                ClampViewMips(clamped.Texture2D.MostDetailedMip, clamped.Texture2D.MipLevels, skip);
+                break;
+            case D3D11_SRV_DIMENSION_TEXTURE2DARRAY:
+                ClampViewMips(clamped.Texture2DArray.MostDetailedMip, clamped.Texture2DArray.MipLevels, skip);
+                break;
+            default:
+                return g_originalCreateSRV(self, resource, desc, out);
         }
 
         const HRESULT hr = g_originalCreateSRV(self, resource, &clamped, out);
@@ -342,12 +362,14 @@ namespace {
         CopySubresourceRegion1_t copySubresourceRegion1 = nullptr;
     };
 
-    std::mutex g_contextVtablesMutex;
+    // shared_mutex, not mutex: written once per distinct vtable, read on every
+    // upload/copy recorded on any context.
+    std::shared_mutex g_contextVtablesMutex;
     std::unordered_map<void*, ContextOriginals> g_contextOriginals;  // vtable -> originals
 
     // Returned by value: tiny, and it means no map reference outlives the lock.
     ContextOriginals OriginalsFor(void* context) {
-        const std::scoped_lock lock(g_contextVtablesMutex);
+        const std::shared_lock lock(g_contextVtablesMutex);
         const auto it = g_contextOriginals.find(VtableOf(context));
         return it != g_contextOriginals.end() ? it->second : ContextOriginals{};
     }
@@ -445,18 +467,14 @@ namespace {
         if (g_contextOriginals.count(vtable)) return;
 
         ContextOriginals originals;
-        void* original = nullptr;
 
-        if (PatchSlot(context, kSlot_UpdateSubresource, reinterpret_cast<void*>(&Hook_UpdateSubresource),
-                       &original))
-            originals.updateSubresource = reinterpret_cast<UpdateSubresource_t>(original);
-        else
+        if (!PatchSlot(context, kSlot_UpdateSubresource, reinterpret_cast<void*>(&Hook_UpdateSubresource),
+                       &originals.updateSubresource))
             LogLine("[hook] UpdateSubresource FAILED to patch on a context vtable");
 
-        if (PatchSlot(context, kSlot_CopySubresourceRegion,
-                       reinterpret_cast<void*>(&Hook_CopySubresourceRegion), &original))
-            originals.copySubresourceRegion = reinterpret_cast<CopySubresourceRegion_t>(original);
-        else
+        if (!PatchSlot(context, kSlot_CopySubresourceRegion,
+                       reinterpret_cast<void*>(&Hook_CopySubresourceRegion),
+                       &originals.copySubresourceRegion))
             LogLine("[hook] CopySubresourceRegion FAILED to patch on a context vtable");
 
         // The *1 overloads only exist on ID3D11DeviceContext1+; probe via
@@ -464,16 +482,14 @@ namespace {
         // the real vtable's end would corrupt adjacent memory.
         ID3D11DeviceContext1* context1 = nullptr;
         if (SUCCEEDED(static_cast<IUnknown*>(context)->QueryInterface(IID_PPV_ARGS(&context1))) && context1) {
-            if (PatchSlot(context1, kSlot_UpdateSubresource1,
-                           reinterpret_cast<void*>(&Hook_UpdateSubresource1), &original))
-                originals.updateSubresource1 = reinterpret_cast<UpdateSubresource1_t>(original);
-            else
+            if (!PatchSlot(context1, kSlot_UpdateSubresource1,
+                           reinterpret_cast<void*>(&Hook_UpdateSubresource1),
+                           &originals.updateSubresource1))
                 LogLine("[hook] UpdateSubresource1 FAILED to patch on a context vtable");
 
-            if (PatchSlot(context1, kSlot_CopySubresourceRegion1,
-                           reinterpret_cast<void*>(&Hook_CopySubresourceRegion1), &original))
-                originals.copySubresourceRegion1 = reinterpret_cast<CopySubresourceRegion1_t>(original);
-            else
+            if (!PatchSlot(context1, kSlot_CopySubresourceRegion1,
+                           reinterpret_cast<void*>(&Hook_CopySubresourceRegion1),
+                           &originals.copySubresourceRegion1))
                 LogLine("[hook] CopySubresourceRegion1 FAILED to patch on a context vtable");
 
             context1->Release();
@@ -513,33 +529,26 @@ namespace {
     void HookDevice(ID3D11Device* device) {
         if (!device || g_deviceHooked.exchange(true)) return;
 
-        void* original = nullptr;
-
         if (!PatchSlot(device, kSlot_CreateTexture2D, reinterpret_cast<void*>(&Hook_CreateTexture2D),
-                        &original)) {
+                        &g_originalCreateTexture2D)) {
             LogLine("[hook] CreateTexture2D FAILED to patch, no reduction will happen");
             g_deviceHooked.store(false);
             return;
         }
-        g_originalCreateTexture2D = reinterpret_cast<CreateTexture2D_t>(original);
         LogLine("[hook] CreateTexture2D patched");
 
-        if (PatchSlot(device, kSlot_CreateShaderResourceView,
-                       reinterpret_cast<void*>(&Hook_CreateShaderResourceView), &original))
-            g_originalCreateSRV = reinterpret_cast<CreateSRV_t>(original);
-        else
+        if (!PatchSlot(device, kSlot_CreateShaderResourceView,
+                       reinterpret_cast<void*>(&Hook_CreateShaderResourceView), &g_originalCreateSRV))
             LogLine("[hook] CreateShaderResourceView FAILED to patch, reduced textures won't get their views clamped");
 
-        if (PatchSlot(device, kSlot_CreateDeferredContext,
-                       reinterpret_cast<void*>(&Hook_CreateDeferredContext), &original))
-            g_originalCreateDeferredContext = reinterpret_cast<CreateDeferredContext_t>(original);
-        else
+        if (!PatchSlot(device, kSlot_CreateDeferredContext,
+                       reinterpret_cast<void*>(&Hook_CreateDeferredContext),
+                       &g_originalCreateDeferredContext))
             LogLine("[hook] CreateDeferredContext FAILED to patch, deferred-context uploads/copies won't be remapped");
 
-        if (PatchSlot(device, kSlot_GetImmediateContext,
-                       reinterpret_cast<void*>(&Hook_GetImmediateContext), &original))
-            g_originalGetImmediateContext = reinterpret_cast<GetImmediateContext_t>(original);
-        else
+        if (!PatchSlot(device, kSlot_GetImmediateContext,
+                       reinterpret_cast<void*>(&Hook_GetImmediateContext),
+                       &g_originalGetImmediateContext))
             LogLine("[hook] GetImmediateContext FAILED to patch");
     }
 
@@ -608,6 +617,21 @@ HRESULT WINAPI D3D11CreateDeviceAndSwapChain(
     }
 
     return hr;
+}
+
+// Pure passthrough: the D3D11 device it creates is backed by an
+// ID3D12Device the caller already owns, so this proxy's own D3D11 hooks
+// don't apply to it. Exported only so a game that imports it from
+// d3d11.dll still loads with this proxy in place.
+HRESULT WINAPI D3D11On12CreateDevice(
+    IUnknown* d3d12Device, UINT flags, const D3D_FEATURE_LEVEL* featureLevels, UINT numFeatureLevels,
+    IUnknown* const* commandQueues, UINT numQueues, UINT nodeMask, ID3D11Device** device,
+    ID3D11DeviceContext** immediateContext, D3D_FEATURE_LEVEL* chosenFeatureLevel) {
+    Init();
+    return g_realOn12CreateDevice
+               ? g_realOn12CreateDevice(d3d12Device, flags, featureLevels, numFeatureLevels, commandQueues,
+                                        numQueues, nodeMask, device, immediateContext, chosenFeatureLevel)
+               : E_NOINTERFACE;
 }
 
 }  // extern "C"

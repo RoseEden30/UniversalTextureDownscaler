@@ -35,6 +35,9 @@ namespace {
 
     PFN_D3D12_CREATE_DEVICE g_realCreateDevice = nullptr;
     PFN_D3D12_GET_DEBUG_INTERFACE g_realGetDebugInterface = nullptr;
+    // How an Agility SDK app selects its redistributable runtime version
+    // (D3D12SDKConfiguration), so a game using it still starts behind this proxy.
+    PFN_D3D12_GET_INTERFACE g_realGetInterface = nullptr;
     PFN_D3D12_SERIALIZE_ROOT_SIGNATURE g_realSerializeRootSignature = nullptr;
     PFN_D3D12_SERIALIZE_VERSIONED_ROOT_SIGNATURE g_realSerializeVersionedRootSignature = nullptr;
     PFN_D3D12_CREATE_ROOT_SIGNATURE_DESERIALIZER g_realCreateRootSignatureDeserializer = nullptr;
@@ -65,6 +68,7 @@ namespace {
 
             g_realCreateDevice = LoadReal<PFN_D3D12_CREATE_DEVICE>("D3D12CreateDevice");
             g_realGetDebugInterface = LoadReal<PFN_D3D12_GET_DEBUG_INTERFACE>("D3D12GetDebugInterface");
+            g_realGetInterface = LoadReal<PFN_D3D12_GET_INTERFACE>("D3D12GetInterface");
             g_realSerializeRootSignature =
                 LoadReal<PFN_D3D12_SERIALIZE_ROOT_SIGNATURE>("D3D12SerializeRootSignature");
             g_realSerializeVersionedRootSignature =
@@ -231,13 +235,15 @@ namespace {
 
     using Release_t = ULONG(STDMETHODCALLTYPE*)(IUnknown*);
 
-    std::mutex g_releaseHooksMutex;
+    // shared_mutex, not mutex: written once per distinct vtable, read on every
+    // Release of every resource sharing it.
+    std::shared_mutex g_releaseHooksMutex;
     std::unordered_map<void*, Release_t> g_originalReleaseByVtable;  // vtable -> original Release
 
     ULONG STDMETHODCALLTYPE Hook_Release(IUnknown* self) {
         Release_t original = nullptr;
         {
-            const std::scoped_lock lock(g_releaseHooksMutex);
+            const std::shared_lock lock(g_releaseHooksMutex);
             const auto it = g_originalReleaseByVtable.find(VtableOf(self));
             if (it != g_originalReleaseByVtable.end()) original = it->second;
         }
@@ -272,9 +278,9 @@ namespace {
         const std::scoped_lock lock(g_releaseHooksMutex);
         if (g_originalReleaseByVtable.count(vtable)) return;
 
-        void* original = nullptr;
+        Release_t original = nullptr;
         if (PatchSlot(resource, kSlot_Release, reinterpret_cast<void*>(&Hook_Release), &original))
-            g_originalReleaseByVtable[vtable] = reinterpret_cast<Release_t>(original);
+            g_originalReleaseByVtable[vtable] = original;
     }
 
     // ID3D12Device::CreateCommittedResource / CreatePlacedResource
@@ -461,29 +467,18 @@ namespace {
 
     CreateSRV_t g_originalCreateSRV = nullptr;
 
-    void STDMETHODCALLTYPE Hook_CreateShaderResourceView(
-        ID3D12Device* self, ID3D12Resource* resource, const D3D12_SHADER_RESOURCE_VIEW_DESC* desc,
-        D3D12_CPU_DESCRIPTOR_HANDLE dest) {
-        const auto skip = SkipFor(resource);
-        if (skip == 0 || !desc || desc->ViewDimension != D3D12_SRV_DIMENSION_TEXTURE2D) {
-            g_originalCreateSRV(self, resource, desc, dest);
-            return;
-        }
+    // Clamps to at least one level rather than signalling "empty": a view
+    // creation call has to produce something valid.
+    void ClampViewMips(UINT& mostDetailedMip, UINT& mipLevels, float& minLodClamp, std::uint32_t skip) {
+        const UINT originalMost = mostDetailedMip;
+        mostDetailedMip         = originalMost >= skip ? originalMost - skip : 0;
 
-        D3D12_SHADER_RESOURCE_VIEW_DESC clamped = *desc;
-        auto& tex                                = clamped.Texture2D;
-
-        const UINT originalMost = tex.MostDetailedMip;
-        tex.MostDetailedMip     = originalMost >= skip ? originalMost - skip : 0;
-
-        if (tex.MipLevels != static_cast<UINT>(-1)) {
+        if (mipLevels != static_cast<UINT>(-1)) {
             // 64-bit so MostDetailedMip+MipLevels can't wrap; the result is
             // bounded by the original level count and fits back in UINT.
-            const std::uint64_t originalEnd = static_cast<std::uint64_t>(originalMost) + tex.MipLevels;
+            const std::uint64_t originalEnd = static_cast<std::uint64_t>(originalMost) + mipLevels;
             const std::uint64_t newEnd      = originalEnd >= skip ? originalEnd - skip : 0;
-            tex.MipLevels                   = newEnd > tex.MostDetailedMip
-                                                  ? static_cast<UINT>(newEnd - tex.MostDetailedMip)
-                                                  : 1;
+            mipLevels = newEnd > mostDetailedMip ? static_cast<UINT>(newEnd - mostDetailedMip) : 1;
         }
 
         // ResourceMinLODClamp is a floating-point mip index into the same
@@ -491,9 +486,35 @@ namespace {
         // so it has to move by the same skip. Left alone, a clamp of 3.0
         // would keep sampling three levels further down a chain that already
         // lost its top `skip` levels.
-        tex.ResourceMinLODClamp = tex.ResourceMinLODClamp > static_cast<float>(skip)
-                                      ? tex.ResourceMinLODClamp - static_cast<float>(skip)
-                                      : 0.0f;
+        minLodClamp = minLodClamp > static_cast<float>(skip) ? minLodClamp - static_cast<float>(skip) : 0.0f;
+    }
+
+    void STDMETHODCALLTYPE Hook_CreateShaderResourceView(
+        ID3D12Device* self, ID3D12Resource* resource, const D3D12_SHADER_RESOURCE_VIEW_DESC* desc,
+        D3D12_CPU_DESCRIPTOR_HANDLE dest) {
+        const auto skip = SkipFor(resource);
+        if (skip == 0 || !desc) {
+            g_originalCreateSRV(self, resource, desc, dest);
+            return;
+        }
+
+        // TEXTURE2DARRAY too, not just TEXTURE2D: a reduced resource always has
+        // DepthOrArraySize==1, but engines that describe every 2D texture
+        // through the array dimension are common enough.
+        D3D12_SHADER_RESOURCE_VIEW_DESC clamped = *desc;
+        switch (desc->ViewDimension) {
+            case D3D12_SRV_DIMENSION_TEXTURE2D:
+                ClampViewMips(clamped.Texture2D.MostDetailedMip, clamped.Texture2D.MipLevels,
+                              clamped.Texture2D.ResourceMinLODClamp, skip);
+                break;
+            case D3D12_SRV_DIMENSION_TEXTURE2DARRAY:
+                ClampViewMips(clamped.Texture2DArray.MostDetailedMip, clamped.Texture2DArray.MipLevels,
+                              clamped.Texture2DArray.ResourceMinLODClamp, skip);
+                break;
+            default:
+                g_originalCreateSRV(self, resource, desc, dest);
+                return;
+        }
 
         g_originalCreateSRV(self, resource, &clamped, dest);
     }
@@ -521,12 +542,14 @@ namespace {
         Barrier7_t barrier7                   = nullptr;
     };
 
-    std::mutex g_commandListVtablesMutex;
+    // shared_mutex, not mutex: written once per distinct vtable, read on every
+    // barrier and copy recorded on any command list.
+    std::shared_mutex g_commandListVtablesMutex;
     std::unordered_map<void*, CommandListOriginals> g_commandListOriginals;  // vtable -> originals
 
     // Returned by value: tiny, and it means no map reference outlives the lock.
     CommandListOriginals OriginalsFor(void* commandList) {
-        const std::scoped_lock lock(g_commandListVtablesMutex);
+        const std::shared_lock lock(g_commandListVtablesMutex);
         const auto it = g_commandListOriginals.find(VtableOf(commandList));
         return it != g_commandListOriginals.end() ? it->second : CommandListOriginals{};
     }
@@ -737,18 +760,13 @@ namespace {
         if (g_commandListOriginals.count(vtable)) return;
 
         CommandListOriginals originals;
-        void* original = nullptr;
 
-        if (PatchSlot(commandList, kSlot_ResourceBarrier,
-                       reinterpret_cast<void*>(&Hook_ResourceBarrier), &original))
-            originals.resourceBarrier = reinterpret_cast<ResourceBarrier_t>(original);
-        else
+        if (!PatchSlot(commandList, kSlot_ResourceBarrier,
+                       reinterpret_cast<void*>(&Hook_ResourceBarrier), &originals.resourceBarrier))
             LogLine("[hook] ResourceBarrier FAILED to patch on a command list vtable");
 
-        if (PatchSlot(commandList, kSlot_CopyTextureRegion,
-                       reinterpret_cast<void*>(&Hook_CopyTextureRegion), &original))
-            originals.copyTextureRegion = reinterpret_cast<CopyTextureRegion_t>(original);
-        else
+        if (!PatchSlot(commandList, kSlot_CopyTextureRegion,
+                       reinterpret_cast<void*>(&Hook_CopyTextureRegion), &originals.copyTextureRegion))
             LogLine("[hook] CopyTextureRegion FAILED to patch on a command list vtable");
 
         // Enhanced Barriers only exist on ID3D12GraphicsCommandList7+; probe
@@ -758,9 +776,8 @@ namespace {
         ID3D12GraphicsCommandList7* commandList7 = nullptr;
         if (SUCCEEDED(static_cast<IUnknown*>(commandList)->QueryInterface(IID_PPV_ARGS(&commandList7))) &&
             commandList7) {
-            if (PatchSlot(commandList7, kSlot_Barrier7, reinterpret_cast<void*>(&Hook_Barrier7), &original))
-                originals.barrier7 = reinterpret_cast<Barrier7_t>(original);
-            else
+            if (!PatchSlot(commandList7, kSlot_Barrier7, reinterpret_cast<void*>(&Hook_Barrier7),
+                           &originals.barrier7))
                 LogLine("[hook] Barrier (Enhanced Barriers) FAILED to patch on a command list vtable");
             commandList7->Release();
         } else {
@@ -801,33 +818,26 @@ namespace {
     void HookDevice(ID3D12Device* device) {
         if (!device || g_deviceHooked.exchange(true)) return;
 
-        void* original = nullptr;
-
         if (!PatchSlot(device, kSlot_CreateCommittedResource,
-                        reinterpret_cast<void*>(&Hook_CreateCommittedResource), &original)) {
+                        reinterpret_cast<void*>(&Hook_CreateCommittedResource),
+                        &g_originalCreateCommittedResource)) {
             LogLine("[hook] CreateCommittedResource FAILED to patch, no reduction will happen");
             g_deviceHooked.store(false);
             return;
         }
-        g_originalCreateCommittedResource = reinterpret_cast<CreateCommittedResource_t>(original);
         LogLine("[hook] CreateCommittedResource patched");
 
-        if (PatchSlot(device, kSlot_CreatePlacedResource,
-                       reinterpret_cast<void*>(&Hook_CreatePlacedResource), &original))
-            g_originalCreatePlacedResource = reinterpret_cast<CreatePlacedResource_t>(original);
-        else
+        if (!PatchSlot(device, kSlot_CreatePlacedResource,
+                       reinterpret_cast<void*>(&Hook_CreatePlacedResource),
+                       &g_originalCreatePlacedResource))
             LogLine("[hook] CreatePlacedResource FAILED to patch");
 
-        if (PatchSlot(device, kSlot_CreateShaderResourceView,
-                       reinterpret_cast<void*>(&Hook_CreateShaderResourceView), &original))
-            g_originalCreateSRV = reinterpret_cast<CreateSRV_t>(original);
-        else
+        if (!PatchSlot(device, kSlot_CreateShaderResourceView,
+                       reinterpret_cast<void*>(&Hook_CreateShaderResourceView), &g_originalCreateSRV))
             LogLine("[hook] CreateShaderResourceView FAILED to patch, reduced textures won't get their views clamped");
 
-        if (PatchSlot(device, kSlot_CreateCommandList,
-                       reinterpret_cast<void*>(&Hook_CreateCommandList), &original))
-            g_originalCreateCommandList = reinterpret_cast<CreateCommandList_t>(original);
-        else
+        if (!PatchSlot(device, kSlot_CreateCommandList,
+                       reinterpret_cast<void*>(&Hook_CreateCommandList), &g_originalCreateCommandList))
             LogLine("[hook] CreateCommandList FAILED to patch, barriers/copies won't be remapped");
 
         // CreateCommandList1 only exists on ID3D12Device4+; probe via
@@ -836,10 +846,9 @@ namespace {
         // adjacent memory instead of just failing cleanly.
         ID3D12Device4* device4 = nullptr;
         if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&device4))) && device4) {
-            if (PatchSlot(device4, kSlot_CreateCommandList1,
-                           reinterpret_cast<void*>(&Hook_CreateCommandList1), &original))
-                g_originalCreateCommandList1 = reinterpret_cast<CreateCommandList1_t>(original);
-            else
+            if (!PatchSlot(device4, kSlot_CreateCommandList1,
+                           reinterpret_cast<void*>(&Hook_CreateCommandList1),
+                           &g_originalCreateCommandList1))
                 LogLine("[hook] CreateCommandList1 FAILED to patch, lists created that way won't have "
                         "their barriers/copies remapped");
             device4->Release();
@@ -885,6 +894,11 @@ HRESULT WINAPI D3D12CreateDevice(IUnknown* adapter, D3D_FEATURE_LEVEL minLevel, 
 HRESULT WINAPI D3D12GetDebugInterface(REFIID riid, void** debug) {
     Init();
     return g_realGetDebugInterface ? g_realGetDebugInterface(riid, debug) : E_NOINTERFACE;
+}
+
+HRESULT WINAPI D3D12GetInterface(REFCLSID rclsid, REFIID riid, void** out) {
+    Init();
+    return g_realGetInterface ? g_realGetInterface(rclsid, riid, out) : E_NOINTERFACE;
 }
 
 HRESULT WINAPI D3D12SerializeRootSignature(

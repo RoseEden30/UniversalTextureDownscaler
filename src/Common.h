@@ -105,7 +105,12 @@ inline void LoadConfig(const std::wstring& directory) {
 
 // generic COM vtable patching
 
-inline bool PatchSlot(void* object, std::size_t slot, void* hook, void** original) {
+// `original` is written before the hook goes live, so a call arriving on
+// another thread the instant the slot is swapped always has something to
+// chain into. Templated on the function pointer type so callers can hand it
+// the very variable their hook reads, with no cast in between.
+template <typename Fn>
+inline bool PatchSlot(void* object, std::size_t slot, void* hook, Fn* original) {
     auto** vtable = *reinterpret_cast<void***>(object);
     void** entry  = &vtable[slot];
 
@@ -113,7 +118,7 @@ inline bool PatchSlot(void* object, std::size_t slot, void* hook, void** origina
     if (!VirtualProtect(entry, sizeof(void*), PAGE_READWRITE, &previousProtection)) return false;
 
     void* previous = *entry;
-    *original      = previous;
+    *original      = reinterpret_cast<Fn>(previous);
 
     void* swapped = InterlockedExchangePointer(static_cast<void* volatile*>(entry), hook);
 
@@ -266,12 +271,11 @@ inline void InstallVramSpoof(IUnknown* adapterUnknown) {
         return;
     }
 
-    void* original = nullptr;
+    QueryVideoMemoryInfo_t original = nullptr;
     if (PatchSlot(adapter3, kSlot_QueryVideoMemoryInfo, reinterpret_cast<void*>(&Hook_QueryVideoMemoryInfo),
                   &original)) {
         g_spoofedAdapterVtable.store(VtableOf(adapter3), std::memory_order_relaxed);
-        g_originalQueryVideoMemoryInfo.store(reinterpret_cast<QueryVideoMemoryInfo_t>(original),
-                                             std::memory_order_release);
+        g_originalQueryVideoMemoryInfo.store(original, std::memory_order_release);
     } else {
         LogLine("[hook] QueryVideoMemoryInfo FAILED to patch, FakeVramBudgetMB won't apply");
     }
@@ -318,15 +322,16 @@ inline void RecordReduction(std::uint64_t savedBytes) {
 
 inline void Heartbeat() {
     const auto count = g_trackedCount.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (count % kSummaryInterval != 0) return;
 
     // DirectStorage writes textures by subresource index, unremapped here.
+    // Checked on the summary tick rather than per texture: GetModuleHandleW
+    // takes the loader lock, and this runs inside a graphics-API call.
     static std::atomic<bool> dstorageReported{false};
     if (!dstorageReported.load(std::memory_order_relaxed) && GetModuleHandleW(L"dstorage.dll") &&
         !dstorageReported.exchange(true, std::memory_order_relaxed))
         LogLine("[hook] dstorage.dll loaded: textures streamed through DirectStorage aren't remapped, "
                 "a reduced one populated that way may come out wrong");
-
-    if (count % kSummaryInterval != 0) return;
 
     const std::scoped_lock lock(g_logMutex);
     if (!g_log) return;
