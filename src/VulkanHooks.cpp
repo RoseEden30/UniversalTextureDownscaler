@@ -38,6 +38,7 @@
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 using namespace Common;
@@ -869,6 +870,29 @@ namespace {
         if (!state.realCreateImage) {
             LogLine("[hook] vkCreateDevice: next layer/loader has no real vkCreateImage, no reduction "
                     "will happen on this device");
+        }
+
+        {
+            const std::pair<const char*, const void*> resolved[] = {
+                {"vkCreateImage", state.realCreateImage},
+                {"vkDestroyImage", state.realDestroyImage},
+                {"vkCreateImageView", state.realCreateImageView},
+                {"vkCmdCopyBufferToImage", state.realCopyBufferToImage},
+                {"vkCmdCopyBufferToImage2", state.realCopyBufferToImage2},
+                {"vkCmdCopyImageToBuffer", state.realCopyImageToBuffer},
+                {"vkCmdCopyImageToBuffer2", state.realCopyImageToBuffer2},
+                {"vkCmdCopyImage", state.realCopyImage},
+                {"vkCmdCopyImage2", state.realCopyImage2},
+                {"vkCmdBlitImage", state.realBlitImage},
+                {"vkCmdBlitImage2", state.realBlitImage2},
+                {"vkCmdPipelineBarrier", state.realPipelineBarrier},
+                {"vkCmdPipelineBarrier2", state.realPipelineBarrier2},
+            };
+
+            std::string active, missing;
+            for (const auto& [name, fn] : resolved) (fn ? active : missing).append(" ").append(name);
+            LogLine(("[hook] active:" + active).c_str());
+            if (!missing.empty()) LogLine(("[hook] unavailable:" + missing).c_str());
         }
 
         // Registered even if some pointers are null: vkGetDeviceProcAddr

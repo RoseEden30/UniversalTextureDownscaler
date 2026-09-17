@@ -590,16 +590,20 @@ namespace {
     }
 
     template <typename Device, std::size_t GetSlot, std::size_t CreateSlot>
-    void HookContextFactories(ID3D11Device* device, const char* version) {
+    void HookContextFactories(ID3D11Device* device, const char* version, std::string& active) {
         Device* typed = nullptr;
         if (FAILED(device->QueryInterface(IID_PPV_ARGS(&typed))) || !typed) return;
 
         using Get = ImmediateContextFactory<GetSlot>;
-        if (!PatchSlot(typed, GetSlot, reinterpret_cast<void*>(&Get::Hook), &Get::original))
+        if (PatchSlot(typed, GetSlot, reinterpret_cast<void*>(&Get::Hook), &Get::original))
+            active += std::string(" GetImmediateContext") + version;
+        else
             LogFactoryFailure("GetImmediateContext", version);
 
         using Create = DeferredContextFactory<CreateSlot>;
-        if (!PatchSlot(typed, CreateSlot, reinterpret_cast<void*>(&Create::Hook), &Create::original))
+        if (PatchSlot(typed, CreateSlot, reinterpret_cast<void*>(&Create::Hook), &Create::original))
+            active += std::string(" CreateDeferredContext") + version;
+        else
             LogFactoryFailure("CreateDeferredContext", version);
 
         typed->Release();
@@ -621,33 +625,43 @@ namespace {
             g_deviceHooked.store(false);
             return;
         }
-        LogLine("[hook] CreateTexture2D patched");
+        std::string active = " CreateTexture2D";
 
-        if (!PatchSlot(device, kSlot_CreateShaderResourceView,
-                       reinterpret_cast<void*>(&Hook_CreateShaderResourceView), &g_originalCreateSRV))
+        if (PatchSlot(device, kSlot_CreateShaderResourceView,
+                      reinterpret_cast<void*>(&Hook_CreateShaderResourceView), &g_originalCreateSRV))
+            active += " CreateShaderResourceView";
+        else
             LogLine("[hook] CreateShaderResourceView FAILED to patch, reduced textures won't get their views clamped");
 
-        if (!PatchSlot(device, kSlot_CreateDeferredContext,
-                       reinterpret_cast<void*>(&Hook_CreateDeferredContext),
-                       &g_originalCreateDeferredContext))
+        if (PatchSlot(device, kSlot_CreateDeferredContext,
+                      reinterpret_cast<void*>(&Hook_CreateDeferredContext),
+                      &g_originalCreateDeferredContext))
+            active += " CreateDeferredContext";
+        else
             LogLine("[hook] CreateDeferredContext FAILED to patch, deferred-context uploads/copies won't be remapped");
 
-        if (!PatchSlot(device, kSlot_GetImmediateContext,
-                       reinterpret_cast<void*>(&Hook_GetImmediateContext),
-                       &g_originalGetImmediateContext))
+        if (PatchSlot(device, kSlot_GetImmediateContext,
+                      reinterpret_cast<void*>(&Hook_GetImmediateContext),
+                      &g_originalGetImmediateContext))
+            active += " GetImmediateContext";
+        else
             LogLine("[hook] GetImmediateContext FAILED to patch");
 
-        HookContextFactories<ID3D11Device1, kSlot_GetImmediateContext1, kSlot_CreateDeferredContext1>(device, "1");
-        HookContextFactories<ID3D11Device2, kSlot_GetImmediateContext2, kSlot_CreateDeferredContext2>(device, "2");
-        HookContextFactories<ID3D11Device3, kSlot_GetImmediateContext3, kSlot_CreateDeferredContext3>(device, "3");
+        HookContextFactories<ID3D11Device1, kSlot_GetImmediateContext1, kSlot_CreateDeferredContext1>(device, "1", active);
+        HookContextFactories<ID3D11Device2, kSlot_GetImmediateContext2, kSlot_CreateDeferredContext2>(device, "2", active);
+        HookContextFactories<ID3D11Device3, kSlot_GetImmediateContext3, kSlot_CreateDeferredContext3>(device, "3", active);
 
         ID3D11Device3* device3 = nullptr;
         if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&device3))) && device3) {
-            if (!PatchSlot(device3, kSlot_CreateTexture2D1,
-                           reinterpret_cast<void*>(&Hook_CreateTexture2D1), &g_originalCreateTexture2D1))
+            if (PatchSlot(device3, kSlot_CreateTexture2D1,
+                          reinterpret_cast<void*>(&Hook_CreateTexture2D1), &g_originalCreateTexture2D1))
+                active += " CreateTexture2D1";
+            else
                 LogLine("[hook] CreateTexture2D1 FAILED to patch");
             device3->Release();
         }
+
+        LogLine(("[hook] active:" + active).c_str());
     }
 
     // Both exported entry points allow ppDevice == nullptr with only a

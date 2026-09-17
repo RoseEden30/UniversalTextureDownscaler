@@ -9,7 +9,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>UniversalTextureDownscalerInstaller</RootNamespace>
     <InvariantGlobalization>true</InvariantGlobalization>
-    <Version>1.3.0</Version>
+    <Version>1.4.0</Version>
     <ApplicationIcon>app.ico</ApplicationIcon>
 
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>

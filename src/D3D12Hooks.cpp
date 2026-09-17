@@ -889,19 +889,25 @@ namespace {
             g_deviceHooked.store(false);
             return;
         }
-        LogLine("[hook] CreateCommittedResource patched");
+        std::string active = " CreateCommittedResource";
 
-        if (!PatchSlot(device, kSlot_CreatePlacedResource,
-                       reinterpret_cast<void*>(&Hook_CreatePlacedResource),
-                       &g_originalCreatePlacedResource))
+        if (PatchSlot(device, kSlot_CreatePlacedResource,
+                      reinterpret_cast<void*>(&Hook_CreatePlacedResource),
+                      &g_originalCreatePlacedResource))
+            active += " CreatePlacedResource";
+        else
             LogLine("[hook] CreatePlacedResource FAILED to patch");
 
-        if (!PatchSlot(device, kSlot_CreateShaderResourceView,
-                       reinterpret_cast<void*>(&Hook_CreateShaderResourceView), &g_originalCreateSRV))
+        if (PatchSlot(device, kSlot_CreateShaderResourceView,
+                      reinterpret_cast<void*>(&Hook_CreateShaderResourceView), &g_originalCreateSRV))
+            active += " CreateShaderResourceView";
+        else
             LogLine("[hook] CreateShaderResourceView FAILED to patch, reduced textures won't get their views clamped");
 
-        if (!PatchSlot(device, kSlot_CreateCommandList,
-                       reinterpret_cast<void*>(&Hook_CreateCommandList), &g_originalCreateCommandList))
+        if (PatchSlot(device, kSlot_CreateCommandList,
+                      reinterpret_cast<void*>(&Hook_CreateCommandList), &g_originalCreateCommandList))
+            active += " CreateCommandList";
+        else
             LogLine("[hook] CreateCommandList FAILED to patch, barriers/copies won't be remapped");
 
         // CreateCommandList1 only exists on ID3D12Device4+; probe via
@@ -910,15 +916,19 @@ namespace {
         // adjacent memory instead of just failing cleanly.
         ID3D12Device4* device4 = nullptr;
         if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&device4))) && device4) {
-            if (!PatchSlot(device4, kSlot_CreateCommandList1,
-                           reinterpret_cast<void*>(&Hook_CreateCommandList1),
-                           &g_originalCreateCommandList1))
+            if (PatchSlot(device4, kSlot_CreateCommandList1,
+                          reinterpret_cast<void*>(&Hook_CreateCommandList1),
+                          &g_originalCreateCommandList1))
+                active += " CreateCommandList1";
+            else
                 LogLine("[hook] CreateCommandList1 FAILED to patch, lists created that way won't have "
                         "their barriers/copies remapped");
 
-            if (!PatchSlot(device4, kSlot_CreateCommittedResource1,
-                           reinterpret_cast<void*>(&Hook_CreateCommittedResource1),
-                           &g_originalCreateCommittedResource1))
+            if (PatchSlot(device4, kSlot_CreateCommittedResource1,
+                          reinterpret_cast<void*>(&Hook_CreateCommittedResource1),
+                          &g_originalCreateCommittedResource1))
+                active += " CreateCommittedResource1";
+            else
                 LogLine("[hook] CreateCommittedResource1 FAILED to patch");
             device4->Release();
         } else {
@@ -930,14 +940,18 @@ namespace {
         // the real vtable's end would corrupt adjacent memory.
         ID3D12Device8* device8 = nullptr;
         if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&device8))) && device8) {
-            if (!PatchSlot(device8, kSlot_CreateCommittedResource2,
-                           reinterpret_cast<void*>(&Hook_CreateCommittedResource2),
-                           &g_originalCreateCommittedResource2))
+            if (PatchSlot(device8, kSlot_CreateCommittedResource2,
+                          reinterpret_cast<void*>(&Hook_CreateCommittedResource2),
+                          &g_originalCreateCommittedResource2))
+                active += " CreateCommittedResource2";
+            else
                 LogLine("[hook] CreateCommittedResource2 FAILED to patch");
 
-            if (!PatchSlot(device8, kSlot_CreatePlacedResource1,
-                           reinterpret_cast<void*>(&Hook_CreatePlacedResource1),
-                           &g_originalCreatePlacedResource1))
+            if (PatchSlot(device8, kSlot_CreatePlacedResource1,
+                          reinterpret_cast<void*>(&Hook_CreatePlacedResource1),
+                          &g_originalCreatePlacedResource1))
+                active += " CreatePlacedResource1";
+            else
                 LogLine("[hook] CreatePlacedResource1 FAILED to patch");
             device8->Release();
         }
@@ -946,17 +960,23 @@ namespace {
         // to the Barrier hook above.
         ID3D12Device10* device10 = nullptr;
         if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&device10))) && device10) {
-            if (!PatchSlot(device10, kSlot_CreateCommittedResource3,
-                           reinterpret_cast<void*>(&Hook_CreateCommittedResource3),
-                           &g_originalCreateCommittedResource3))
+            if (PatchSlot(device10, kSlot_CreateCommittedResource3,
+                          reinterpret_cast<void*>(&Hook_CreateCommittedResource3),
+                          &g_originalCreateCommittedResource3))
+                active += " CreateCommittedResource3";
+            else
                 LogLine("[hook] CreateCommittedResource3 FAILED to patch");
 
-            if (!PatchSlot(device10, kSlot_CreatePlacedResource2,
-                           reinterpret_cast<void*>(&Hook_CreatePlacedResource2),
-                           &g_originalCreatePlacedResource2))
+            if (PatchSlot(device10, kSlot_CreatePlacedResource2,
+                          reinterpret_cast<void*>(&Hook_CreatePlacedResource2),
+                          &g_originalCreatePlacedResource2))
+                active += " CreatePlacedResource2";
+            else
                 LogLine("[hook] CreatePlacedResource2 FAILED to patch");
             device10->Release();
         }
+
+        LogLine(("[hook] active:" + active).c_str());
     }
 }
 

@@ -39,20 +39,46 @@ public static class ApiDetect
 
     public static GraphicsApi Detect(string exePath)
     {
+        var api = FromImports(SafeImports(exePath));
+        if (api != GraphicsApi.Unknown) return api;
+
+        // Some games reach the API only through a middleware dll shipped beside
+        // them (Streamline, XeSS), leaving the exe's own import table silent.
+        return FromImports(NeighbourImports(exePath));
+    }
+
+    private static GraphicsApi FromImports(HashSet<string> imports)
+    {
+        if (imports.Contains("d3d12.dll")) return GraphicsApi.D3D12;
+        if (imports.Contains("d3d11.dll")) return GraphicsApi.D3D11;
+        if (imports.Contains("vulkan-1.dll")) return GraphicsApi.Vulkan;
+        return GraphicsApi.Unknown;
+    }
+
+    // A malformed or unreadable file just means "couldn't tell"; the user can
+    // still pick manually, this is never the only way to choose an API.
+    private static HashSet<string> SafeImports(string path)
+    {
+        try { return ImportedModuleNames(path); }
+        catch { return []; }
+    }
+
+    private static HashSet<string> NeighbourImports(string exePath)
+    {
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         try
         {
-            var imports = ImportedModuleNames(exePath);
-            if (imports.Contains("d3d12.dll")) return GraphicsApi.D3D12;
-            if (imports.Contains("d3d11.dll")) return GraphicsApi.D3D11;
-            if (imports.Contains("vulkan-1.dll")) return GraphicsApi.Vulkan;
-            return GraphicsApi.Unknown;
+            var folder = Path.GetDirectoryName(exePath);
+            if (folder is null) return names;
+
+            foreach (var dll in Directory.EnumerateFiles(folder, "*.dll").Take(200))
+                names.UnionWith(SafeImports(dll));
         }
         catch
         {
-            // A malformed or unreadable exe just means "couldn't tell", the user can
-            // still pick manually, this is never the only way to choose an API.
-            return GraphicsApi.Unknown;
+            // unreadable folder, nothing to add
         }
+        return names;
     }
 
     private static HashSet<string> ImportedModuleNames(string exePath)
