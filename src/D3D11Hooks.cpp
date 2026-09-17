@@ -16,6 +16,7 @@
 
 #include <d3d11.h>
 #include <d3d11_1.h>
+#include <d3d11_3.h>
 #include <d3d11on12.h>
 
 #include <mutex>
@@ -70,6 +71,15 @@ namespace {
     constexpr std::size_t kSlot_CreateShaderResourceView = 7;
     constexpr std::size_t kSlot_CreateDeferredContext    = 27;
     constexpr std::size_t kSlot_GetImmediateContext      = 40;
+    // ID3D11Device1/2/3 each append their own pair of context factories, plus
+    // Device3's CreateTexture2D1.
+    constexpr std::size_t kSlot_GetImmediateContext1   = 43;
+    constexpr std::size_t kSlot_CreateDeferredContext1 = 44;
+    constexpr std::size_t kSlot_GetImmediateContext2   = 50;
+    constexpr std::size_t kSlot_CreateDeferredContext2 = 51;
+    constexpr std::size_t kSlot_CreateTexture2D1       = 54;
+    constexpr std::size_t kSlot_GetImmediateContext3   = 61;
+    constexpr std::size_t kSlot_CreateDeferredContext3 = 62;
     // ID3D11DeviceContext = IUnknown(3) + ID3D11DeviceChild(4: GetDevice,
     // Get/SetPrivateData, SetPrivateDataInterface) + own methods (108 total,
     // VSSetConstantBuffers..UpdateSubresource..ExecuteCommandList..):
@@ -84,7 +94,10 @@ namespace {
     // Mirrors the D3D12 proxy's filter: render-target/UAV, shared/generated-
     // mips, CPU-visible, and array/cubemap textures are all excluded. No
     // Enabled check here; the caller checks that separately.
-    const char* RejectionReason(const D3D11_TEXTURE2D_DESC& desc) {
+    // Templated over D3D11_TEXTURE2D_DESC and _DESC1: every field read here is
+    // spelled the same in both, and DESC1 only adds TextureLayout.
+    template <typename Desc>
+    const char* RejectionReason(const Desc& desc) {
         if (desc.MipLevels <= 1) return "single-mip";
         if (desc.ArraySize != 1) return "array-or-cubemap";
 
@@ -107,6 +120,12 @@ namespace {
         // size it was created at.
         if (desc.CPUAccessFlags != 0) return "cpu-visible";
         if (desc.Usage != D3D11_USAGE_DEFAULT && desc.Usage != D3D11_USAGE_IMMUTABLE) return "dynamic-or-staging";
+
+        // UNDEFINED is the driver-opaque layout; the others have an API-defined
+        // byte layout the app is free to compute offsets into, same reasoning as
+        // the D3D12 filter's explicit-layout rejection.
+        if constexpr (requires { desc.TextureLayout; })
+            if (desc.TextureLayout != D3D11_TEXTURE_LAYOUT_UNDEFINED) return "explicit-layout";
 
         return nullptr;
     }
@@ -138,7 +157,8 @@ namespace {
 
     // logging
 
-    void LogReduction(const D3D11_TEXTURE2D_DESC& original, std::uint32_t skip) {
+    template <typename Desc>
+    void LogReduction(const Desc& original, std::uint32_t skip) {
         if (skip == 0) return;
 
         const auto originalBytes = EstimateBytes(original.Width, original.Height, original.MipLevels);
@@ -215,13 +235,18 @@ namespace {
 
     CreateTexture2D_t g_originalCreateTexture2D = nullptr;
 
-    HRESULT STDMETHODCALLTYPE Hook_CreateTexture2D(
-        ID3D11Device* self, const D3D11_TEXTURE2D_DESC* desc, const D3D11_SUBRESOURCE_DATA* data,
-        ID3D11Texture2D** out) {
-        const char* structuralReason = desc ? RejectionReason(*desc) : "no-desc";
-        if (structuralReason == nullptr) Heartbeat();
+    using CreateTexture2D1_t = HRESULT(STDMETHODCALLTYPE*)(
+        ID3D11Device3*, const D3D11_TEXTURE2D_DESC1*, const D3D11_SUBRESOURCE_DATA*, ID3D11Texture2D1**);
 
-        const char* reason = g_enabled.load(std::memory_order_relaxed) ? structuralReason : "disabled";
+    CreateTexture2D1_t g_originalCreateTexture2D1 = nullptr;
+
+    // Shared by both create entry points; `call(desc, data)` runs the down-chain call.
+    template <typename Desc, typename Call>
+    HRESULT CreateTexture(const Desc* desc, const D3D11_SUBRESOURCE_DATA* data, void** out, Call&& call) {
+        const char* structural = desc ? RejectionReason(*desc) : "no-desc";
+        if (structural == nullptr) Heartbeat();
+
+        const char* reason = g_enabled.load(std::memory_order_relaxed) ? structural : "disabled";
 
         if (g_verbose.load(std::memory_order_relaxed) && desc && desc->MipLevels > 1) {
             const std::scoped_lock lock(g_logMutex);
@@ -232,39 +257,32 @@ namespace {
             }
         }
 
-        if (reason != nullptr) return g_originalCreateTexture2D(self, desc, data, out);
+        if (reason != nullptr) return call(desc, data);
 
-        const auto skip = ComputeSkip(desc->Width, desc->Height, desc->MipLevels, IsBlockCompressed(desc->Format),
-                                       g_maxSize.load(std::memory_order_relaxed));
-        if (skip == 0) {
-            return g_originalCreateTexture2D(self, desc, data, out);
-        }
+        const auto skip = ComputeSkip(desc->Width, desc->Height, desc->MipLevels,
+                                      IsBlockCompressed(desc->Format),
+                                      g_maxSize.load(std::memory_order_relaxed));
+        if (skip == 0) return call(desc, data);
 
-        D3D11_TEXTURE2D_DESC reduced = *desc;
+        Desc reduced      = *desc;
         reduced.Width     = desc->Width >> skip;
         reduced.Height    = desc->Height >> skip;
         reduced.MipLevels = desc->MipLevels - skip;
 
-        // ArraySize==1 is guaranteed by RejectionReason, so the subresource
-        // data array (if any) is exactly MipLevels entries in mip order -
-        // dropping the first `skip` keeps every remaining entry lined up
-        // with the mip level it now describes. Same technique the reference
-        // SKSE plugin uses. When data is null, the app populates the
-        // texture later via UpdateSubresource/CopySubresourceRegion, which
-        // get remapped by the hooks below instead.
-        const HRESULT hr =
-            g_originalCreateTexture2D(self, &reduced, data ? data + skip : nullptr, out);
+        // ArraySize==1 is guaranteed by RejectionReason, so the subresource data
+        // array (if any) is exactly MipLevels entries in mip order; dropping the
+        // first `skip` keeps the rest lined up with the level they now describe.
+        const HRESULT hr = call(&reduced, data ? data + skip : nullptr);
 
         if (FAILED(hr)) {
-            // Something about this texture wasn't accounted for. Better a
-            // full-size texture than none at all.
+            // Better a full-size texture than none at all.
             const std::scoped_lock lock(g_logMutex);
             if (g_log) {
                 fprintf(g_log, "D3D refused reduced %ux%u mips=%u (0x%08X), retrying at full size\n",
                         reduced.Width, reduced.Height, reduced.MipLevels, static_cast<unsigned>(hr));
                 fflush(g_log);
             }
-            return g_originalCreateTexture2D(self, desc, data, out);
+            return call(desc, data);
         }
 
         LogReduction(*desc, skip);
@@ -275,6 +293,24 @@ namespace {
         }
 
         return hr;
+    }
+
+    HRESULT STDMETHODCALLTYPE Hook_CreateTexture2D(
+        ID3D11Device* self, const D3D11_TEXTURE2D_DESC* desc, const D3D11_SUBRESOURCE_DATA* data,
+        ID3D11Texture2D** out) {
+        return CreateTexture(desc, data, reinterpret_cast<void**>(out),
+            [&] (const D3D11_TEXTURE2D_DESC* d, const D3D11_SUBRESOURCE_DATA* i) {
+                return g_originalCreateTexture2D(self, d, i, out);
+            });
+    }
+
+    HRESULT STDMETHODCALLTYPE Hook_CreateTexture2D1(
+        ID3D11Device3* self, const D3D11_TEXTURE2D_DESC1* desc, const D3D11_SUBRESOURCE_DATA* data,
+        ID3D11Texture2D1** out) {
+        return CreateTexture(desc, data, reinterpret_cast<void**>(out),
+            [&] (const D3D11_TEXTURE2D_DESC1* d, const D3D11_SUBRESOURCE_DATA* i) {
+                return g_originalCreateTexture2D1(self, d, i, out);
+            });
     }
 
     // ID3D11Device::CreateShaderResourceView
@@ -519,6 +555,56 @@ namespace {
         if (out && *out) EnsureContextHooked(*out);
     }
 
+    // ID3D11Device1/2/3 each add their own pair of these, returning a derived
+    // interface on the same object. A context taken through one of them would
+    // otherwise never have its uploads and copies remapped. Same ABI shape as
+    // the pair above, so one template per kind, keyed by slot to give each its
+    // own down-chain pointer.
+
+    template <std::size_t Slot>
+    struct DeferredContextFactory {
+        static inline CreateDeferredContext_t original = nullptr;
+
+        static HRESULT STDMETHODCALLTYPE Hook(ID3D11Device* self, UINT flags, ID3D11DeviceContext** out) {
+            const HRESULT hr = original(self, flags, out);
+            if (SUCCEEDED(hr) && out && *out) EnsureContextHooked(*out);
+            return hr;
+        }
+    };
+
+    template <std::size_t Slot>
+    struct ImmediateContextFactory {
+        static inline GetImmediateContext_t original = nullptr;
+
+        static void STDMETHODCALLTYPE Hook(ID3D11Device* self, ID3D11DeviceContext** out) {
+            original(self, out);
+            if (out && *out) EnsureContextHooked(*out);
+        }
+    };
+
+    void LogFactoryFailure(const char* method, const char* version) {
+        const std::scoped_lock lock(g_logMutex);
+        if (!g_log) return;
+        fprintf(g_log, "[hook] %s%s FAILED to patch, contexts from it won't be remapped\n", method, version);
+        fflush(g_log);
+    }
+
+    template <typename Device, std::size_t GetSlot, std::size_t CreateSlot>
+    void HookContextFactories(ID3D11Device* device, const char* version) {
+        Device* typed = nullptr;
+        if (FAILED(device->QueryInterface(IID_PPV_ARGS(&typed))) || !typed) return;
+
+        using Get = ImmediateContextFactory<GetSlot>;
+        if (!PatchSlot(typed, GetSlot, reinterpret_cast<void*>(&Get::Hook), &Get::original))
+            LogFactoryFailure("GetImmediateContext", version);
+
+        using Create = DeferredContextFactory<CreateSlot>;
+        if (!PatchSlot(typed, CreateSlot, reinterpret_cast<void*>(&Create::Hook), &Create::original))
+            LogFactoryFailure("CreateDeferredContext", version);
+
+        typed->Release();
+    }
+
     // device-level install
 
     std::atomic<bool> g_deviceHooked{false};
@@ -550,6 +636,18 @@ namespace {
                        reinterpret_cast<void*>(&Hook_GetImmediateContext),
                        &g_originalGetImmediateContext))
             LogLine("[hook] GetImmediateContext FAILED to patch");
+
+        HookContextFactories<ID3D11Device1, kSlot_GetImmediateContext1, kSlot_CreateDeferredContext1>(device, "1");
+        HookContextFactories<ID3D11Device2, kSlot_GetImmediateContext2, kSlot_CreateDeferredContext2>(device, "2");
+        HookContextFactories<ID3D11Device3, kSlot_GetImmediateContext3, kSlot_CreateDeferredContext3>(device, "3");
+
+        ID3D11Device3* device3 = nullptr;
+        if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&device3))) && device3) {
+            if (!PatchSlot(device3, kSlot_CreateTexture2D1,
+                           reinterpret_cast<void*>(&Hook_CreateTexture2D1), &g_originalCreateTexture2D1))
+                LogLine("[hook] CreateTexture2D1 FAILED to patch");
+            device3->Release();
+        }
     }
 
     // Both exported entry points allow ppDevice == nullptr with only a

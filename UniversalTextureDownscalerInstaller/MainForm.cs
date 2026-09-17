@@ -275,6 +275,11 @@ public sealed class MainForm : Form
     private string? GameFolder() =>
         string.IsNullOrWhiteSpace(_exePathBox.Text) ? null : Path.GetDirectoryName(_exePathBox.Text);
 
+    // A trailing backslash would escape the closing quote; doubling it makes the
+    // argument parser read one literal backslash.
+    private static string Quoted(string path) =>
+        path.EndsWith('\\') ? $"\"{path}\\\"" : $"\"{path}\"";
+
     /// Keeps the window responsive while the elevated worker and its UAC prompt run.
     private async Task<bool> RunElevated(string arguments)
     {
@@ -317,7 +322,7 @@ public sealed class MainForm : Form
 
             if (api == GraphicsApi.Vulkan && !Program.IsElevated())
             {
-                var args = $"--install-vulkan \"{folder}\" {(settings.Enabled ? 1 : 0)} "
+                var args = $"--install-vulkan {Quoted(folder)} {(settings.Enabled ? 1 : 0)} "
                            + $"{settings.MaxSize} {(settings.Verbose ? 1 : 0)}";
                 if (await RunElevated(args)) ShowStatus($"Installed for Vulkan in \"{folder}\".");
                 else ShowStatus("Vulkan install needs administrator, it was cancelled or failed.", failed: true);
@@ -342,7 +347,7 @@ public sealed class MainForm : Form
         {
             if (Installer.IsVulkanInstalled(folder) && !Program.IsElevated())
             {
-                if (await RunElevated($"--uninstall-vulkan \"{folder}\"")) ShowStatus($"Removed from \"{folder}\".");
+                if (await RunElevated($"--uninstall-vulkan {Quoted(folder)}")) ShowStatus($"Removed from \"{folder}\".");
                 else ShowStatus("Vulkan uninstall needs administrator, it was cancelled or failed.", failed: true);
                 return;
             }
