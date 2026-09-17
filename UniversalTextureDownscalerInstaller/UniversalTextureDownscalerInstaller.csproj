@@ -23,6 +23,9 @@
        and D3D12 (same binary, see CMakeLists.txt) and gets written out under
        whichever name the target game needs. -->
   <ItemGroup>
+    <EmbeddedResource Include="app.ico">
+      <LogicalName>app.ico</LogicalName>
+    </EmbeddedResource>
     <EmbeddedResource Include="..\build\RelWithDebInfo\d3d12.dll" Condition="Exists('..\build\RelWithDebInfo\d3d12.dll')">
       <LogicalName>d3d.dll</LogicalName>
     </EmbeddedResource>

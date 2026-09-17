@@ -49,6 +49,7 @@ public sealed class MainForm : Form
     public MainForm()
     {
         Text = "UniversalTextureDownscaler";
+        Icon = LoadIcon();
         BackColor = Face;
         ForeColor = Ink;
         Font = Ui;
@@ -154,6 +155,19 @@ public sealed class MainForm : Form
         return line;
     }
 
+    private static Icon? LoadIcon()
+    {
+        try
+        {
+            using var stream = System.Reflection.Assembly.GetExecutingAssembly().GetManifestResourceStream("app.ico");
+            return stream is null ? null : new Icon(stream);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     private static Label Caption(string text) => new()
     {
         Text = text, AutoSize = true, ForeColor = Ink, BackColor = Face, Font = Ui,
@@ -194,6 +208,7 @@ public sealed class MainForm : Form
         {
             Text = "About", Font = Ui, BackColor = Face, ForeColor = Ink,
             FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false, MinimizeBox = false,
+            ShowInTaskbar = false, Icon = Icon,
             StartPosition = FormStartPosition.CenterParent, AutoScaleMode = AutoScaleMode.Dpi,
         };
         close.Click += (_, _) => dialog.Close();
